@@ -41,14 +41,14 @@ class NodeSeekBar @JvmOverloads constructor(
 
     init {
         // 初始化画笔属性
-        linePaint.color = Color.LTGRAY
+        linePaint.color = Color.WHITE
         linePaint.strokeWidth = lineHeight
         linePaint.strokeCap = Paint.Cap.ROUND
 
-        nodePaint.color = Color.GRAY
+        nodePaint.color = Color.WHITE
         nodePaint.style = Paint.Style.FILL
 
-        textPaint.color = Color.GRAY
+        textPaint.color = Color.WHITE
         textPaint.textSize = 36f
         textPaint.textAlign = Paint.Align.CENTER
 

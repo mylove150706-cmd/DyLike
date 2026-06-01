@@ -201,13 +201,14 @@
             android:layout_height="@dimen/dp32"
             android:background="@null"
             android:max="1000"
-            android:progressBackgroundTint="@color/grey_500"
-            android:progressTint="@color/grey_400"
-            android:thumbTint="@color/grey_300"
+            android:progressBackgroundTint="@color/grey_400"
+            android:progressTint="@color/white"
+            android:thumbTint="@color/white"
             android:visibility="gone"
             app:layout_constraintBottom_toTopOf="@id/tv_title"
-            app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            tools:progress="500"
             tools:visibility="visible" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>

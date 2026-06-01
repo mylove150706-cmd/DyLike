@@ -74,20 +74,20 @@ DyLike/
 当前仓库中应用 flavor 为：  
 
 - `prod`  
-- `bate`  
+- `beta`
 
 说明：这里保持仓库现有命名，不额外改动。  
 
 ### 构建调试包
 
 ```bash
-./gradlew :dy-player:assembleBateDebug
+./gradlew :dy-player:assembleBetaDebug
 ```
 
 ### 安装调试包
 
 ```bash
-./gradlew :dy-player:installBateDebug
+./gradlew :dy-player:installBetaDebug
 ```
 
 ### 构建正式包

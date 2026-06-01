@@ -79,7 +79,7 @@ android {
 
             buildConfigField("boolean", "isProd", "true")
         }
-        create("bate") {
+        create("beta") {
             dimension = "mode"
 
             applicationIdSuffix = ".debug"

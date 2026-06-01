@@ -8,9 +8,8 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.net.toUri
-import androidx.core.view.children
 import androidx.lifecycle.lifecycleScope
-import androidx.navigation.findNavController
+import androidx.navigation.fragment.NavHostFragment
 import androidx.navigation.ui.AppBarConfiguration
 import androidx.navigation.ui.setupActionBarWithNavController
 import androidx.navigation.ui.setupWithNavController
@@ -47,16 +46,16 @@ class MainActivity : BaseDisplayActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        init()
     }
 
     override fun onStart() {
         super.onStart()
-        init()
     }
 
     override fun onMenuOpened(featureId: Int, menu: Menu): Boolean {
         // 使更多菜单带图标
-        if (menu.javaClass.getSimpleName().equals("MenuBuilder", ignoreCase = true)) {
+        if (menu.javaClass.simpleName.equals("MenuBuilder", ignoreCase = true)) {
             try {
                 val method: Method = menu.javaClass.getDeclaredMethod(
                     "setOptionalIconsVisible",
@@ -73,7 +72,7 @@ class MainActivity : BaseDisplayActivity() {
 
     private fun init() {
         initView()
-        initBackup()
+        initBackPressed()
         initResult()
         initUpdate()
     }
@@ -85,9 +84,9 @@ class MainActivity : BaseDisplayActivity() {
 
     private fun initNav() {
         val navView: BottomNavigationView = binding.navView
-        navView.children.map { it.id }.toSet()
-        binding.navHostFragmentActivityMain.id
-        val navController = findNavController(R.id.nav_host_fragment_activity_main)
+        val navController = binding.navHostFragmentActivityMain
+            .getFragment<NavHostFragment>()
+            .navController
         // Passing each menu ID as a set of Ids because each
         // menu should be considered as top level destinations.
         val appBarConfiguration = AppBarConfiguration(
@@ -99,7 +98,7 @@ class MainActivity : BaseDisplayActivity() {
         navView.setupWithNavController(navController)
     }
 
-    private fun initBackup() {
+    private fun initBackPressed() {
         onBackPressedDispatcher.addCallback(this) {
             try {
                 val homeIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -172,7 +171,7 @@ class MainActivity : BaseDisplayActivity() {
                         }
                         spUtil.dayStr = "$today#${versionData.versionCode}"
                     }
-                }.onFailure {e ->
+                }.onFailure { e ->
                     spUtil.dayStr = "$today#"
                     Log.d(TAG, "initUpdate: ${e.message}", e)
                 }

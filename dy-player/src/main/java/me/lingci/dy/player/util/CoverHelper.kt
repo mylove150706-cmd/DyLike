@@ -96,20 +96,21 @@ object CoverHelper {
 
     fun setCover(imageView: ImageView, mediaData: MediaData, sourceList: List<SourceData> = emptyList()) {
         val headers = resolveWebDavHeaders(imageView, mediaData, sourceList)
-        // 优先加载 showFile
-        if (loadImage(imageView, mediaData.showFile, headers)) {
-            return
-        }
-        // DEFAULT: 直接显示占位图，不回退到 coverPath()
-        if (mediaData.coverType == CoverType.DEFAULT) {
-            imageView.setImageResource(R.drawable.ic_media_default)
-            return
-        }
-        // CUSTOM/AUTO: 回退到 coverPath()，最终占位图
         val fallbackPath = if (mediaData.type == MediaLibType.WEBDAV) {
             resolveWebDavCoverPath(imageView, mediaData, sourceList)
         } else {
             mediaData.coverPath()
+        }
+        // DEFAULT: 忽略 showFile，只查 cover.jpg，失败后显示占位图
+        if (mediaData.coverType == CoverType.DEFAULT) {
+            if (!loadImage(imageView, fallbackPath, headers)) {
+                imageView.setImageResource(R.drawable.ic_media_default)
+            }
+            return
+        }
+        // CUSTOM/AUTO: 优先加载 showFile，再回退到 cover.jpg，最终显示占位图
+        if (loadImage(imageView, mediaData.showFile, headers)) {
+            return
         }
         if (!loadImage(imageView, fallbackPath, headers)) {
             imageView.setImageResource(R.drawable.ic_media_default)

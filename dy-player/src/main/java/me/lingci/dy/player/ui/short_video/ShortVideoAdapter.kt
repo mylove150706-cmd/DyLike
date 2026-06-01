@@ -68,7 +68,7 @@ class ShortVideoAdapter(
         fun bindItem(item: VideoData) {
             mVideoData = item
             binding.shortVideoView.changeVisibility()
-            binding.shortVideoView.setTitle(item.name)
+            binding.shortVideoView.setTitle(item.name.substringBeforeLast("."))
             binding.shortVideoView.setLike(item.like)
         }
 
