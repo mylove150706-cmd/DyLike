@@ -596,23 +596,12 @@ class WebDavStorage(
                                 if (!currentIsDir && href.endsWith("/")) {
                                     currentIsDir = true
                                 }
-                                val fileName = if (currentName.isNullOrBlank()) {
-                                    val url = URI.create(href).path
-                                    if (currentIsDir && url.endsWith("/")) {
-                                        url.substringBeforeLast("/").substringAfterLast("/")
-                                    } else {
-                                        url.substringAfterLast("/")
-                                    }
-                                } else {
-                                    currentName
-                                }
-                                val normalizedHref = href.trimEnd('/')
-                                val normalizedParent = parentPath.trimEnd('/')
-                                val normalizedBasePath = basePath.trimEnd('/')
-                                val oneself = normalizedHref == normalizedParent
-                                        || normalizedHref == normalizedBasePath
-                                if (oneself.not()) {
-                                    val filePath = if (parentPath.endsWith("/")) "$parentPath$fileName" else "$parentPath/$fileName"
+                                val filePath = hrefToStoragePath(href, parentPath)
+                                val normalizedParent = normalizeStoragePath(parentPath)
+                                val isDirectChild = filePath != normalizedParent && getParentPath(filePath) == normalizedParent
+                                if (isDirectChild) {
+                                    val fileName = currentName.takeIf { it.isNullOrBlank().not() }
+                                        ?: filePath.substringAfterLast("/")
                                     val entity = FileEntity(
                                         id = href.md5(),
                                         title = fileName,
@@ -658,6 +647,43 @@ class WebDavStorage(
             val adjustedPath = relativePath.trimStart('/').replace("//", "/")
             "$rootUrl$adjustedPath"
         }
+    }
+
+    private fun hrefToStoragePath(href: String, parentPath: String): String {
+        val hrefPath = extractUriPath(href)
+        val normalizedHrefPath = if (hrefPath.startsWith("/")) {
+            normalizeStoragePath(hrefPath)
+        } else {
+            normalizeStoragePath("${normalizeStoragePath(parentPath)}/$hrefPath")
+        }
+        val normalizedBasePath = normalizeStoragePath(extractUriPath(basePath))
+        return when {
+            normalizedBasePath == "/" -> normalizedHrefPath
+            normalizedHrefPath == normalizedBasePath -> "/"
+            normalizedHrefPath.startsWith("$normalizedBasePath/") -> {
+                normalizeStoragePath(normalizedHrefPath.removePrefix(normalizedBasePath))
+            }
+            else -> normalizedHrefPath
+        }
+    }
+
+    private fun extractUriPath(value: String): String {
+        return try {
+            URI.create(value).path ?: value.substringBefore('?').substringBefore('#')
+        } catch (e: Exception) {
+            value.substringBefore('?').substringBefore('#')
+        }
+    }
+
+    private fun normalizeStoragePath(path: String): String {
+        if (path.isBlank() || path == "/") return "/"
+        var normalized = path.replace('\\', '/')
+        while (normalized.contains("//")) {
+            normalized = normalized.replace("//", "/")
+        }
+        normalized = normalized.trimEnd('/')
+        if (normalized.isEmpty()) return "/"
+        return if (normalized.startsWith("/")) normalized else "/$normalized"
     }
 
     // 获取父路径
