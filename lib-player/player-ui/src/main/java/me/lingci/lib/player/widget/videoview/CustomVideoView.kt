@@ -75,7 +75,6 @@ class CustomVideoView @JvmOverloads constructor(
 
     override fun setUrl(url: String?, headers: MutableMap<String, String>?) {
         //headers?.put("User-Agent", HttpUtil.EDGE_UA)
-        Log.d(this@CustomVideoView, url, headers)
         super.setUrl(url, headers)
         scaleReset()
     }

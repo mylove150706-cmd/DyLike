@@ -153,11 +153,7 @@ class SourceFragment : BaseTransitionFragment() {
             ) { itemId ->
                 when(itemId) {
                     1 -> {
-                        val webdavManagerDialog = WebdavManagerDialog.newInstance(item) {
-                            mSourceItemAdapter.updateItem(it, position)
-                            LibraryCompat.saveSources(spUtil, mSourceItemAdapter.getCustomData())
-                        }
-                        webdavManagerDialog.show(childFragmentManager, webdavManagerDialog.tag)
+                        showSourceManager(item, position)
                     }
                     2 -> {
                         mSourceItemAdapter.removeItem(position)
@@ -169,11 +165,41 @@ class SourceFragment : BaseTransitionFragment() {
             itemActionDialog.show(childFragmentManager, itemActionDialog.tag)
         }
         binding.floatingButton.setOnClickListener {
-            val webdavManagerDialog = WebdavManagerDialog.newInstance(null) {
-                mSourceItemAdapter.addItem(it)
-                LibraryCompat.saveSources(spUtil, mSourceItemAdapter.getCustomData())
+            val itemActionDialog = ItemActionDialog(
+                mutableListOf(
+                    ItemAction(1, "添加WebDav资源库"),
+                    ItemAction(2, "添加SMB资源库")
+                )
+            ) { itemId ->
+                when (itemId) {
+                    1 -> showSourceManager(null, -1, StorageType.WEBDAV)
+                    2 -> showSourceManager(null, -1, StorageType.SMB)
+                }
             }
-            webdavManagerDialog.show(childFragmentManager, webdavManagerDialog.tag)
+            itemActionDialog.show(childFragmentManager, itemActionDialog.tag)
+        }
+    }
+
+    private fun showSourceManager(
+        source: SourceData?,
+        position: Int,
+        addType: StorageType? = null
+    ) {
+        val type = source?.storageType() ?: addType ?: StorageType.WEBDAV
+        val onSave: (SourceData) -> Unit = {
+            if (position >= 0) {
+                mSourceItemAdapter.updateItem(it, position)
+            } else {
+                mSourceItemAdapter.addItem(it)
+            }
+            LibraryCompat.saveSources(spUtil, mSourceItemAdapter.getCustomData())
+        }
+        if (type == StorageType.SMB) {
+            val dialog = SmbManagerDialog.newInstance(source, onSave)
+            dialog.show(childFragmentManager, dialog.tag)
+        } else {
+            val dialog = WebdavManagerDialog.newInstance(source, onSave)
+            dialog.show(childFragmentManager, dialog.tag)
         }
     }
 

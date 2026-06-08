@@ -90,7 +90,6 @@ public final class ExoMediaSourceHelper {
         } else if ("rtsp".equals(contentUri.getScheme())) {
             return new RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(contentUri));
         } else if ("smb".equals(contentUri.getScheme())) {
-            Log.d(this, uri, headers);
             return new ProgressiveMediaSource.Factory(new SmbDataSource.Factory(headers))
                     .createMediaSource(MediaItem.fromUri(contentUri));
         }

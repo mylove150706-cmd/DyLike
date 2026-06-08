@@ -189,6 +189,10 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
                 null, "", LibraryCompat.LEGACY_UNBOUND_STORAGE_ID -> "WEBDAV媒体库(旧数据)"
                 else -> sourceList.find { it.id == storageId }?.title ?: "WEBDAV媒体库"
             }
+            MediaLibType.SMB -> when (storageId) {
+                null, "" -> "SMB媒体库"
+                else -> sourceList.find { it.id == storageId }?.title ?: "SMB媒体库"
+            }
             else -> "媒体库"
         }
         val currentStorageId = storageId ?: LibraryCompat.LEGACY_UNBOUND_STORAGE_ID
@@ -196,7 +200,7 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
             if (item.type != mediaType) {
                 return@filter false
             }
-            if (mediaType != MediaLibType.WEBDAV) {
+            if (!isRemoteMedia(mediaType)) {
                 return@filter true
             }
             LibraryCompat.mediaBucketStorageId(item, sourceList) == currentStorageId
@@ -273,8 +277,8 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
             if (item.type == MediaLibType.ONLINE) {
                 startPlayer(item, item.items, longVideoMode)
             }
-            if (item.type == MediaLibType.WEBDAV) {
-                handleMediaDav(item, longVideoMode)
+            if (isRemoteMedia(item.type)) {
+                handleMediaRemote(item, longVideoMode)
             }
         }
         mediaItemAdapter.onLongItemClick { item, position ->
@@ -380,7 +384,7 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
             if (media.type != currentType) {
                 return@filterNot false
             }
-            if (currentType != MediaLibType.WEBDAV) {
+            if (!isRemoteMedia(currentType)) {
                 return@filterNot true
             }
             LibraryCompat.mediaBucketStorageId(media, sourceList) == currentStorageId
@@ -406,7 +410,7 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
         setResult(RESULT_OK)
     }
 
-    private fun handleMediaDav(item: MediaData, longVideoMode: Boolean) {
+    private fun handleMediaRemote(item: MediaData, longVideoMode: Boolean) {
         val sourceList = LibraryCompat.loadSources(spUtil)
         val targetStorageId = LibraryCompat.effectiveStorageId(item, sourceList)
         if (targetStorageId == null) {
@@ -431,10 +435,12 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
             }
             val videos = mutableListOf<VideoData>()
             storage.listFile(item.path, false).collect { file ->
-                if ((file.isFile.not() && (spUtil.browserShowHide || file.name.notStartDot())) || file.name.isVideo()) {
+                if (file.isFile && file.name.isVideo()) {
                     videos.add(VideoData().apply {
                         name = file.name
                         videoUrl = storage.fullPath(file.path)
+                        type = source.storageType()
+                        parentPath = file.path.substringBeforeLast("/").substringAfterLast("/")
                         putToken(storage.getToken())
                     })
                 }
@@ -491,6 +497,10 @@ class MediaFullActivity : BaseActivity(), MenuProvider {
                 false
             )
         }
+    }
+
+    private fun isRemoteMedia(type: MediaLibType): Boolean {
+        return type == MediaLibType.WEBDAV || type == MediaLibType.SMB
     }
 
     private fun resetLayout(orientation: Int) {

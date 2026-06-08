@@ -234,6 +234,8 @@ class FileBrowserActivity : BaseActivity(), MenuProvider {
                         val videoData = VideoData()
                         videoData.name = fileBean.name
                         videoData.videoUrl = storage.fullPath(fileBean.path)
+                        videoData.type = sourceData?.type ?: StorageType.WEBDAV
+                        videoData.parentPath = fileBean.path.substringBeforeLast("/").substringAfterLast("/")
                         videoData.putToken(storage.getToken())
                         list.add(videoData)
                         if (fileBean.name == item.name) {

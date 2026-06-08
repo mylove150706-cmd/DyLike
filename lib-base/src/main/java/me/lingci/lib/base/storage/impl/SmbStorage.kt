@@ -6,38 +6,46 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import jcifs.CIFSContext
+import jcifs.config.PropertyConfiguration
 import jcifs.context.BaseContext
-import jcifs.context.SingletonContext
+import jcifs.smb.SmbAuthException
 import jcifs.smb.NtlmPasswordAuthenticator
 import jcifs.smb.SmbFile
 import me.lingci.lib.base.storage.IStorage
 import me.lingci.lib.base.storage.entity.FileEntity
 import me.lingci.lib.base.storage.entity.StorageConfig
+import me.lingci.lib.base.storage.smb.SmbAuthToken
 import me.lingci.lib.base.util.md5
 import java.io.File
-import java.util.*
+import java.util.Properties
 
 /**
  * SMB文件系统实现
  * 依赖库：jcifs-ng (https://github.com/AgNO3/jcifs-ng)
  */
-
 class SmbStorage(
     private val config: StorageConfig.SmbStorageConfig,
     private val localCacheDir: String // 本地缓存目录
 ) : IStorage {
 
-    // SMB上下文
+    // SMB上下文，带超时配置
     private val cifsContext: CIFSContext by lazy {
-        val baseCtx = SingletonContext.getInstance()
+        val credentials = SmbAuthToken.normalize(config.username, config.password, config.domain)
+        val properties = Properties().apply {
+            // 设置连接和响应超时（毫秒）
+            setProperty("jcifs.smb.client.responseTimeout", "30000")
+            setProperty("jcifs.smb.client.soTimeout", "35000")
+            setProperty("jcifs.smb.client.maxConnections", "4")
+        }
+        val baseCtx = BaseContext(PropertyConfiguration(properties))
 
-        if (config.username.isNullOrBlank() || config.password.isNullOrBlank()) {
-            baseCtx
+        if (credentials.username.isNullOrBlank()) {
+            baseCtx.withAnonymousCredentials()
         } else {
             val auth = NtlmPasswordAuthenticator(
-                config.domain,
-                config.username,
-                config.password
+                credentials.domain,
+                credentials.username,
+                credentials.password.orEmpty()
             )
             baseCtx.withCredentials(auth)
         }
@@ -45,50 +53,86 @@ class SmbStorage(
 
     // SMB根路径
     private val rootPath: String by lazy {
-        "smb://${config.server}:${config.port}/${config.share}/"
+        val server = config.server.trim()
+            .removePrefix("smb://")
+            .substringBefore('/')
+            .substringBefore(':')
+        "smb://$server:${config.port}/$shareName/"
+    }
+
+    private val shareName: String by lazy {
+        config.share.trim().trim('/')
     }
 
     override fun rootFile(): FileEntity {
-        TODO("Not yet implemented")
+        return FileEntity(
+            id = rootPath.md5(),
+            title = config.share,
+            name = config.share,
+            path = "/",
+            isFile = false,
+            size = 0,
+            lastModified = 0,
+            type = config.type,
+            storageId = config.id,
+            mimeType = ""
+        )
     }
 
     override fun fullPath(path: String): String {
-        TODO("Not yet implemented")
+        return getSmbPath(path)
     }
 
     override fun getToken(): String {
-        TODO("Not yet implemented")
+        return SmbAuthToken.encode(config.username, config.password, config.domain)
     }
 
-    override suspend fun testConnect(): Boolean {
-        TODO("Not yet implemented")
+    override suspend fun testConnect(): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val smbFile = SmbFile(rootPath, cifsContext)
+            smbFile.exists()
+        } catch (_: SmbAuthException) {
+            false
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
     }
 
     override suspend fun listFiles(path: String, refresh: Boolean): Flow<List<FileEntity>> = flow {
-        val smbPath = getSmbPath(path)
+        val smbPath = getSmbDirectoryPath(path)
 
-        val fileList = mutableListOf<FileEntity>()
         try {
             val smbFile = SmbFile(smbPath, cifsContext)
 
             if (smbFile.exists() && smbFile.isDirectory) {
-                val files = smbFile.listFiles()?.mapNotNull { smbFileToEntity(it) }?.filter { true } ?: emptyList()
+                val files = smbFile.listFiles()?.mapNotNull { smbFileToEntity(it) } ?: emptyList()
                 emit(files)
             } else {
                 emit(emptyList())
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            emit(emptyList())
         }
-        emit(fileList)
     }.flowOn(Dispatchers.IO)
 
     override suspend fun listFile(
         path: String,
         refresh: Boolean
-    ): Flow<FileEntity> {
-        TODO("Not yet implemented")
-    }
+    ): Flow<FileEntity> = flow {
+        val smbPath = getSmbDirectoryPath(path)
+        try {
+            val smbFile = SmbFile(smbPath, cifsContext)
+            if (smbFile.exists() && smbFile.isDirectory) {
+                smbFile.listFiles()?.forEach { file ->
+                    smbFileToEntity(file)?.let { emit(it) }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }.flowOn(Dispatchers.IO)
 
     override suspend fun getFileInfo(path: String): FileEntity? = withContext(Dispatchers.IO) {
         return@withContext try {
@@ -226,32 +270,32 @@ class SmbStorage(
 
     override fun searchFiles(query: String, rootPath: String): Flow<List<FileEntity>> = flow {
         val results = mutableListOf<FileEntity>()
-        searchSmbDirectory(getSmbPath(rootPath), query, results)
+        searchSmbDirectory(getSmbDirectoryPath(rootPath), query, results)
         emit(results)
     }.flowOn(Dispatchers.IO)
 
     override fun release() {
-        // 释放SMB资源
-        try {
-            (cifsContext as? BaseContext)?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        // jcifs SingletonContext and derived credential contexts are shared; do not close them here.
     }
 
-    // 辅助方法：将SmbFile转换为FileEntity
+    // ==================== 辅助方法 ====================
+
+    // 将SmbFile转换为FileEntity
     private fun smbFileToEntity(smbFile: SmbFile): FileEntity? {
         return try {
+            val name = smbFile.name.trimEnd('/')
             FileEntity(
                 id = smbFile.path.md5(),
-                name = smbFile.name,
+                title = name,
+                name = name,
                 path = getRelativePath(smbFile),
+                fullPath = smbFile.path,
                 isFile = smbFile.isDirectory.not(),
                 size = if (smbFile.isDirectory) 0 else smbFile.length(),
                 lastModified = smbFile.lastModified(),
                 type = config.type,
                 storageId = config.id,
-                mimeType = "${getMimeType(smbFile.name)}"
+                mimeType = getMimeType(name) ?: ""
             )
         } catch (e: Exception) {
             e.printStackTrace()
@@ -261,18 +305,57 @@ class SmbStorage(
 
     // 获取SMB路径
     private fun getSmbPath(relativePath: String): String {
-        return if (relativePath.isEmpty() || relativePath == "/") {
+        val rawPath = relativePath.trim().replace('\\', '/')
+        if (rawPath.startsWith("smb://", ignoreCase = true)) {
+            return rawPath
+        }
+        val adjustedPath = normalizeRelativePath(relativePath)
+        return if (adjustedPath.isEmpty()) {
             rootPath
         } else {
-            val adjustedPath = relativePath.trimStart('/')
             "$rootPath$adjustedPath"
-        }.replace("//", "/").replace("/", "/")
+        }
+    }
+
+    private fun getSmbDirectoryPath(relativePath: String): String {
+        val smbPath = getSmbPath(relativePath)
+        return if (smbPath.endsWith('/')) smbPath else "$smbPath/"
+    }
+
+    private fun normalizeRelativePath(path: String): String {
+        val rawPath = path.trim().replace('\\', '/')
+        var normalized = if (rawPath.startsWith("smb://", ignoreCase = true)) {
+            getRelativePathFromSmbUrl(rawPath)
+        } else {
+            rawPath
+        }
+        while (normalized.contains("//")) {
+            normalized = normalized.replace("//", "/")
+        }
+        return stripSharePrefix(normalized.trim('/'))
     }
 
     // 获取相对路径
     private fun getRelativePath(smbFile: SmbFile): String {
-        val url = smbFile.path.replace(rootPath, "")
-        return url.ifEmpty { "/" }
+        val relative = normalizeRelativePath(smbFile.path)
+        return if (relative.isEmpty()) "/" else "/$relative"
+    }
+
+    private fun getRelativePathFromSmbUrl(smbPath: String): String {
+        val pathPart = smbPath
+            .substring(6)
+            .substringAfter('/', "")
+        return stripSharePrefix(pathPart.trim('/'))
+    }
+
+    private fun stripSharePrefix(path: String): String {
+        val normalized = path.trim('/')
+        if (normalized.isEmpty() || shareName.isEmpty()) return normalized
+
+        val firstSegment = normalized.substringBefore('/')
+        if (!firstSegment.equals(shareName, ignoreCase = true)) return normalized
+
+        return normalized.substringAfter('/', "").trim('/')
     }
 
     // 获取MIME类型
@@ -289,6 +372,17 @@ class SmbStorage(
             "gif" -> "image/gif"
             "mp3" -> "audio/mpeg"
             "mp4" -> "video/mp4"
+            "mkv" -> "video/x-matroska"
+            "avi" -> "video/x-msvideo"
+            "flv" -> "video/x-flv"
+            "wmv" -> "video/x-ms-wmv"
+            "mov" -> "video/quicktime"
+            "ts" -> "video/mp2t"
+            "m4v" -> "video/mp4"
+            "webm" -> "video/webm"
+            "ass", "ssa" -> "text/x-ssa"
+            "srt" -> "application/x-subrip"
+            "vtt" -> "text/vtt"
             else -> null
         }
     }
@@ -323,7 +417,9 @@ class SmbStorage(
     ): Boolean {
         return try {
             if (!source.isDirectory) return false
-            if (!target.exists()) return false
+            if (!target.exists()) {
+                target.mkdirs()
+            }
 
             val files = source.listFiles() ?: return true
             var total = files.size.toFloat()
@@ -440,5 +536,4 @@ class SmbStorage(
             e.printStackTrace()
         }
     }
-
 }

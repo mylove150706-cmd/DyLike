@@ -155,7 +155,8 @@ enum class MediaLibType(val value: Int) {
     ONLINE(3),
     WEBDAV(4),
     LIKE(5),
-    PLAYLIST(6);
+    PLAYLIST(6),
+    SMB(7);
 
     companion object {
         fun fromValue(value: Int): MediaLibType {
@@ -165,6 +166,7 @@ enum class MediaLibType(val value: Int) {
         fun fromStorage(storageType: StorageType): MediaLibType {
             return when(storageType) {
                 StorageType.WEBDAV -> WEBDAV
+                StorageType.SMB -> SMB
                 else -> LOCAL
             }
         }

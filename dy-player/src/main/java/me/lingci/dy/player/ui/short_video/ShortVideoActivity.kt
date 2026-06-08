@@ -60,6 +60,7 @@ import me.lingci.lib.player.widget.render.ShortVideoRenderViewFactory
 import me.lingci.lib.player.widget.videoview.CustomVideoView
 import xyz.doikki.videoplayer.player.BaseVideoView.OnStateChangeListener
 import xyz.doikki.videoplayer.player.VideoView
+import xyz.doikki.videoplayer.render.TextureRenderViewFactory
 import me.lingci.lib.player.util.SurfaceRenderTrace
 import me.lingci.lib.player.subtitle.SubtitleCueProvider
 import me.lingci.lib.player.track.ExternalTrackController
@@ -396,19 +397,8 @@ class ShortVideoActivity : BaseActivity() {
 
     private fun initVideoView() {
         mVideoView = CustomVideoView(this)
-        // Resolve before render decisions so AUTO follows the backend that will actually be used.
-        val currentCore = DyPlayerCoreRegistry.resolveCore(spUtil.shortDyPlayerCore)
-        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender)
+        applyConfiguredPlaybackCore()
         mVideoView.setLooping(PlayerInitializer.Player.shortAutoNext.not())
-        // 以下只能二选一，看你的需求
-        if (currentCore != DyPlayerCore.MPV && spUtil.sortRender) {
-            mVideoView.setRenderViewFactory(ShortVideoRenderViewFactory.create())
-        } else {
-            // Do not replace MPV's required Surface renderer with the short-video renderer. MPV keeps
-            // default scaling here until fast-swipe Surface reuse is validated across devices.
-            //mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_CENTER_CROP);
-            mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
-        }
         mController = ShortVideoController(this)
         subtitleControlView = SubtitleControlView(this)
         //subtitleControlView.setSubtitleAbsoluteTextSize(32f)
@@ -593,6 +583,53 @@ class ShortVideoActivity : BaseActivity() {
         //mViewPagerImpl.setScrollingTouchSlop(RecyclerView.TOUCH_SLOP_PAGING)
     }
 
+    private fun applyPlaybackCoreFor(videoBean: VideoData) {
+        if (isSmbVideo(videoBean)) {
+            applyShortVideoRenderFactory()
+            DyPlayerCoreRegistry.applyCore(mVideoView, DyPlayerCore.EXO, spUtil.labMpvSpecialRender)
+            if (!spUtil.sortRender) {
+                mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
+            }
+            return
+        }
+        applyConfiguredPlaybackCore()
+    }
+
+    private fun applyConfiguredPlaybackCore() {
+        val currentCore = DyPlayerCoreRegistry.resolveCore(spUtil.shortDyPlayerCore)
+        if (currentCore == DyPlayerCore.MPV) {
+            if (!spUtil.labMpvSpecialRender) {
+                mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
+            }
+            DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender)
+            // Do not replace MPV's required Surface renderer with the short-video renderer. MPV keeps
+            // default scaling here until fast-swipe Surface reuse is validated across devices.
+            //mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_CENTER_CROP);
+            mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
+            return
+        }
+        if (spUtil.sortRender) {
+            applyShortVideoRenderFactory()
+        }
+        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender)
+        if (!spUtil.sortRender) {
+            mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
+            mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
+        }
+    }
+
+    private fun applyShortVideoRenderFactory() {
+        if (spUtil.sortRender) {
+            mVideoView.setRenderViewFactory(ShortVideoRenderViewFactory.create())
+        } else {
+            mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
+        }
+    }
+
+    private fun isSmbVideo(videoBean: VideoData): Boolean {
+        return videoBean.type == StorageType.SMB || videoBean.videoUrl.startsWith("smb://", ignoreCase = true)
+    }
+
     private fun startPlay(position: Int) {
         mediaLastPlayedUpdateJob?.cancel()
         val count = mViewPagerImpl.childCount
@@ -608,6 +645,7 @@ class ShortVideoActivity : BaseActivity() {
                 subtitleControlView.clearSubtitleLayoutBounds()
                 // mVideoList[position]
                 val videoBean = viewHolder.mVideoData
+                applyPlaybackCoreFor(videoBean)
                 logAndCache(TAG, "D", "开始播放: pos=$position, url=${videoBean.videoUrl}, type=${videoBean.type}")
                 if (videoBean.type == StorageType.WEBDAV) {
                     logAndCache(TAG, "D", "URL类型: webdav, url=${videoBean.videoUrl}")

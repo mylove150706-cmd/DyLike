@@ -14,6 +14,7 @@ import me.lingci.lib.base.storage.IStorage
 import me.lingci.lib.base.storage.entity.StorageConfig
 import me.lingci.lib.base.storage.entity.StorageType
 import me.lingci.lib.base.storage.impl.LocalStorage
+import me.lingci.lib.base.storage.impl.SmbStorage
 import me.lingci.lib.base.storage.impl.WebDavStorage
 
 /**
@@ -85,6 +86,28 @@ data class SourceData(
                         url = siteUrl,
                         username = username,
                         password = password
+                    ), ""
+                )
+            }
+
+            StorageType.SMB -> {
+                val rawServer = siteUrl.trim().removePrefix("smb://")
+                val hostAndMaybePort = rawServer.substringBefore('/')
+                val share = schema.trim().trim('/').ifBlank {
+                    rawServer.substringAfter('/', "").trim('/')
+                }
+                SmbStorage(
+                    StorageConfig.SmbStorageConfig(
+                        id = id,
+                        name = title,
+                        server = hostAndMaybePort.substringBefore(':'),
+                        port = port.toIntOrNull()
+                            ?: hostAndMaybePort.substringAfter(':', "").toIntOrNull()
+                            ?: 445,
+                        share = share,
+                        username = username.takeIf { it.isNotBlank() },
+                        password = password.takeIf { it.isNotBlank() },
+                        domain = null
                     ), ""
                 )
             }

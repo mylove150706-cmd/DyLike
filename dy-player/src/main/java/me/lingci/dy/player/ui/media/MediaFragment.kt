@@ -298,7 +298,7 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
         shuffleStates = LibraryCompat.loadShuffleStates(spUtil)
         if (spUtil.newHome) {
             list.groupBy { item ->
-                if (item.type == MediaLibType.WEBDAV) {
+                if (isRemoteMedia(item.type)) {
                     "${item.type.value}:${LibraryCompat.mediaBucketStorageId(item, sourceList)}"
                 } else {
                     "${item.type.value}:"
@@ -318,6 +318,7 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
                                 sourceList.find { it.id == storageId }?.title ?: "WEBDAV媒体库"
                             }
                         }
+                        MediaLibType.SMB -> sourceList.find { it.id == storageId }?.title ?: "SMB媒体库"
                         else -> "默认"
                     }
                     val allMedia = LibraryCompat.sortMediaByDefault(data).toMutableList()
@@ -640,8 +641,8 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
         if (item.type == MediaLibType.ONLINE) {
             startPlayer(item, item.items, longVideoMode)
         }
-        if (item.type == MediaLibType.WEBDAV) {
-            handleMediaDav(item, longVideoMode)
+        if (isRemoteMedia(item.type)) {
+            handleMediaRemote(item, longVideoMode)
         }
     }
 
@@ -733,6 +734,7 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
                 MediaLibType.ONLINE -> {
                     media.items
                 }
+                MediaLibType.WEBDAV, MediaLibType.SMB -> loadRemoteVideos(media)
                 else -> emptyList()
             }
             withContext(Dispatchers.Main) {
@@ -839,8 +841,8 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
         }
     }
 
-    // 处理dav媒体库
-    private fun handleMediaDav(item: MediaData, longVideoMode: Boolean) {
+    // 处理远程存储媒体库
+    private fun handleMediaRemote(item: MediaData, longVideoMode: Boolean) {
         val sourceList = LibraryCompat.loadSources(spUtil)
         val storageId = LibraryCompat.effectiveStorageId(item, sourceList)
         if (storageId == null) {
@@ -856,33 +858,41 @@ class MediaFragment : BaseTransitionFragment(), MenuProvider {
         showLoading()
         lifecycleScope.launch(Dispatchers.IO) {
             val testConnect = storage.testConnect()
+            val videos = if (testConnect) loadRemoteVideos(item) else emptyList()
             withContext(Dispatchers.Main) {
                 if (!isAdded) return@withContext
                 hideLoading()
                 if (testConnect.not()) {
                     ToastUtil.showToast(requireContext(), "资源库连接失败")
+                } else if (videos.isEmpty()) {
+                    ToastUtil.showToast(requireContext(), "资源库为空")
                 } else {
-                    storage.listFile(item.path, false)
-                        .filter { item ->
-                            item.isFile && item.name.isVideo()
-                        }.map { item ->
-                            val videoData = VideoData()
-                            videoData.name = item.name
-                            videoData.videoUrl = storage.fullPath(item.path)
-                            videoData.putToken(storage.getToken())
-                            videoData
-                        }.toList().let { videos ->
-                            if (videos.isEmpty()) {
-                                ToastUtil.showToast(
-                                    requireContext(), "资源库为空"
-                                )
-                                return@let
-                            }
-                            startPlayer(item, videos, longVideoMode)
-                        }
+                    startPlayer(item, videos, longVideoMode)
                 }
             }
         }
+    }
+
+    private suspend fun loadRemoteVideos(item: MediaData): List<VideoData> {
+        val sourceList = LibraryCompat.loadSources(spUtil)
+        val storageId = LibraryCompat.effectiveStorageId(item, sourceList) ?: return emptyList()
+        val source = sourceList.find { it.id == storageId } ?: return emptyList()
+        val storage = source.toStorage() ?: return emptyList()
+        return storage.listFile(item.path, false)
+            .filter { file -> file.isFile && file.name.isVideo() }
+            .map { file ->
+                VideoData().apply {
+                    name = file.name
+                    videoUrl = storage.fullPath(file.path)
+                    type = source.storageType()
+                    parentPath = file.path.substringBeforeLast("/").substringAfterLast("/")
+                    putToken(storage.getToken())
+                }
+            }.toList()
+    }
+
+    private fun isRemoteMedia(type: MediaLibType): Boolean {
+        return type == MediaLibType.WEBDAV || type == MediaLibType.SMB
     }
 
     private fun resetLayout(orientation: Int) {

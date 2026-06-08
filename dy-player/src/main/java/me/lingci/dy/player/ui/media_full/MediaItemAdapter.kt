@@ -50,7 +50,7 @@ class MediaItemAdapter(
                 MediaLibType.ONLINE -> {
                     binding.ivType.setImageResource(R.drawable.ic_add_link_24)
                 }
-                MediaLibType.WEBDAV -> {
+                MediaLibType.WEBDAV, MediaLibType.SMB -> {
                     binding.ivType.setImageResource(R.drawable.ic_cloud_storage)
                 }
                 else -> binding.ivType.visibility = View.GONE

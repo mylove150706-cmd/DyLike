@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.flow
 import me.lingci.lib.base.storage.entity.FileEntity
 import me.lingci.lib.base.storage.entity.StorageConfig
 import me.lingci.lib.base.storage.impl.LocalStorage
+import me.lingci.lib.base.storage.impl.SmbStorage
 import me.lingci.lib.base.storage.impl.WebDavStorage
 
 /**
@@ -92,9 +93,9 @@ class StorageManager() {
             is StorageConfig.LocalStorageConfig -> {
                 LocalStorage(config)
             }
-            /*is StorageConfig.SmbStorageConfig -> {
-                SmbFileSystem(config, cacheDir)
-            }*/
+            is StorageConfig.SmbStorageConfig -> {
+                SmbStorage(config, cacheDir)
+            }
             is StorageConfig.WebDavStorageConfig -> {
                 WebDavStorage(config, cacheDir)
             }

@@ -58,7 +58,7 @@ import java.io.File
 /**
  * 媒体库详情页面
  * 显示媒体库中的视频列表，支持长视频和短视频两种模式
- * 支持不同类型的媒体库：历史记录、收藏、本地、在线、WebDAV
+ * 支持不同类型的媒体库：历史记录、收藏、本地、在线、WebDAV、SMB
  */
 class MediaDetailActivity : BaseActivity(), MenuProvider {
 
@@ -198,7 +198,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
         val boundMedia = countMap.count { it.value > 0 }
         val trackTotal = countMap.values.sum()
         val baseInfo = when (mediaData.type) {
-            MediaLibType.DEFAULT, MediaLibType.LOCAL, MediaLibType.WEBDAV -> "${mediaData.path} \n包含 $totalMedia 条媒体"
+            MediaLibType.DEFAULT, MediaLibType.LOCAL, MediaLibType.WEBDAV, MediaLibType.SMB -> "${mediaData.path} \n包含 $totalMedia 条媒体"
             MediaLibType.ONLINE -> "${mediaData.playType} \n包含 $totalMedia 条媒体"
             else -> binding.tvInfo.text.toString().lineSequence().firstOrNull().orEmpty()
         }
@@ -485,7 +485,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                     }
                 }
                 itemActionDialog.show(supportFragmentManager, itemActionDialog.tag)
-            } else if (item.type == StorageType.LOCAL_STORAGE || item.type == StorageType.WEBDAV) {
+            } else if (item.type == StorageType.LOCAL_STORAGE || item.type == StorageType.WEBDAV || item.type == StorageType.SMB) {
                 val itemActionDialog = ItemActionDialog(
                     mutableListOf(
                         ItemAction(1, "重命名"),
@@ -521,7 +521,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
             val extension = item.videoUrl.substringAfterLast(".", "")
             val fullNewName = if (extension.isNotBlank()) "$newName.$extension" else newName
             val success = when (item.type) {
-                StorageType.WEBDAV -> {
+                StorageType.WEBDAV, StorageType.SMB -> {
                     getStorageForItem(item)?.rename(item.videoUrl, fullNewName) ?: false
                 }
                 else -> {
@@ -535,7 +535,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                     val ext = item.videoUrl.substringAfterLast(".", "")
                     item.name = if (ext.isNotBlank()) "$newName.$ext" else newName
                     item.videoUrl = when (item.type) {
-                        StorageType.WEBDAV -> {
+                        StorageType.WEBDAV, StorageType.SMB -> {
                             val basePath = item.videoUrl.substringBeforeLast("/")
                             "$basePath/$fullNewName"
                         }
@@ -617,7 +617,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
             var successCount = 0
             items.forEach { item ->
                 val success = when (item.type) {
-                    StorageType.WEBDAV -> {
+                    StorageType.WEBDAV, StorageType.SMB -> {
                         getStorageForItem(item)?.delete(item.videoUrl) ?: false
                     }
                     else -> {
@@ -651,7 +651,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
     private fun updateMediaInfo() {
         val count = videoShortItemAdapter.itemCount
         val baseInfo = when (mediaData.type) {
-            MediaLibType.DEFAULT, MediaLibType.LOCAL, MediaLibType.WEBDAV -> "${mediaData.path} \n包含 $count 条媒体"
+            MediaLibType.DEFAULT, MediaLibType.LOCAL, MediaLibType.WEBDAV, MediaLibType.SMB -> "${mediaData.path} \n包含 $count 条媒体"
             MediaLibType.ONLINE -> "${mediaData.playType} \n包含 $count 条媒体"
             else -> return
         }
@@ -776,10 +776,10 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                 changeRecycler(videoData)
                 Log.d(this@MediaDetailActivity, videoData.size)
             }
-            MediaLibType.WEBDAV -> {
+            MediaLibType.WEBDAV, MediaLibType.SMB -> {
                 binding.toolbar.title = "${mediaData.title}详情"
                 binding.btnDanmakuBinding.visibility = if (shortMode) View.GONE else View.VISIBLE
-                handleWebdav()
+                handleRemoteStorage()
             }
             MediaLibType.PLAYLIST -> {
                 binding.toolbar.title = mediaData.title
@@ -842,9 +842,9 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
     }
 
     /**
-     * 处理WebDAV类型媒体库
+     * 处理远程存储类型媒体库
      */
-    private fun handleWebdav() {
+    private fun handleRemoteStorage() {
         val sourceList = LibraryCompat.loadSources(spUtil)
         val storageId = LibraryCompat.effectiveStorageId(mediaData, sourceList)
         if (storageId == null) {
@@ -867,7 +867,7 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                     ToastUtil.showToast(this@MediaDetailActivity, "资源库连接失败")
                     finish()
                 } else {
-                    // 异步加载WebDAV文件列表
+                    // 异步加载远程文件列表
                     storage.listFile(mediaData.path, false)
                         .onEach { item ->
                             if (item.isFile && item.name.isVideo()) {
@@ -876,7 +876,8 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                                     videoData.name = item.name
                                     videoData.videoUrl = storage.fullPath(item.path)
                                     videoData.putToken(storage.getToken())
-                                    videoData.type = StorageType.WEBDAV
+                                    videoData.type = source.storageType()
+                                    videoData.parentPath = item.path.substringBeforeLast("/").substringAfterLast("/")
                                     videoData.mediaId = mediaData.id
                                     videoData.id = videoData.md5()
                                     if (shortMode) {

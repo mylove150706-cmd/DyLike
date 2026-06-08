@@ -26,7 +26,7 @@ class SourceItemAdapter(
         binding.tvSubtitle.text = item.siteUrl
         when(item.storageType()) {
             StorageType.STREAM_LINK -> binding.ivIcon.setImageResource(R.drawable.ic_stream_link)
-            StorageType.WEBDAV -> binding.ivIcon.setImageResource(R.drawable.ic_cloud_storage)
+            StorageType.WEBDAV, StorageType.SMB -> binding.ivIcon.setImageResource(R.drawable.ic_cloud_storage)
             else -> binding.ivIcon.setImageResource(R.drawable.ic_mobile_storage)
         }
         binding.root.setOnClickListener {

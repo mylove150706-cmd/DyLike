@@ -311,6 +311,7 @@ class TrackPanelControlView @JvmOverloads constructor(
     private fun enterFileBrowseMode() {
         isFileBrowseMode = true
         binding.clTrackGroup.visibility = GONE
+        binding.tabLayout.visibility = GONE
         binding.clFileGroup.visibility = VISIBLE
         val folder = getCurrentFolder()
         if (folder.isBlank()) {
@@ -325,6 +326,7 @@ class TrackPanelControlView @JvmOverloads constructor(
         isFileBrowseMode = false
         binding.clFileGroup.visibility = GONE
         binding.clTrackGroup.visibility = VISIBLE
+        binding.tabLayout.visibility = VISIBLE
         if (currentTab == TAB_SETTINGS) {
             currentTab = TAB_AUDIO
             binding.tabLayout.selectTab(binding.tabLayout.getTabAt(0))

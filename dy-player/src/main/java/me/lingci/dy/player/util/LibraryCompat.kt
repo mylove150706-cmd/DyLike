@@ -87,10 +87,11 @@ object LibraryCompat {
     }
 
     fun mediaBucketStorageId(media: MediaData, sources: List<SourceData>): String? {
-        if (media.type != MediaLibType.WEBDAV) {
+        if (!isRemoteMedia(media.type)) {
             return null
         }
-        return effectiveStorageId(media, sources) ?: LEGACY_UNBOUND_STORAGE_ID
+        return effectiveStorageId(media, sources)
+            ?: if (media.type == MediaLibType.WEBDAV) LEGACY_UNBOUND_STORAGE_ID else null
     }
 
     fun sameMedia(a: MediaData, b: MediaData, sources: List<SourceData>): Boolean {
@@ -102,7 +103,7 @@ object LibraryCompat {
         }
         return when (a.type) {
             MediaLibType.DEFAULT, MediaLibType.LOCAL -> normalize(a.path) == normalize(b.path)
-            MediaLibType.WEBDAV -> {
+            MediaLibType.WEBDAV, MediaLibType.SMB -> {
                 mediaBucketStorageId(a, sources) == mediaBucketStorageId(b, sources)
                         && normalize(a.path) == normalize(b.path)
             }
@@ -180,9 +181,9 @@ object LibraryCompat {
             MediaLibType.DEFAULT, MediaLibType.LOCAL -> {
                 "media|LOCAL|${normalize(media.path)}"
             }
-            MediaLibType.WEBDAV -> {
-                val storageId = effectiveStorageId(media, sources) ?: LEGACY_UNBOUND_STORAGE_ID
-                "media|WEBDAV|$storageId|${normalize(media.path)}"
+            MediaLibType.WEBDAV, MediaLibType.SMB -> {
+                val storageId = mediaBucketStorageId(media, sources) ?: LEGACY_UNBOUND_STORAGE_ID
+                "media|${media.type.name}|$storageId|${normalize(media.path)}"
             }
             MediaLibType.ONLINE -> {
                 val firstUrl = media.items.firstOrNull()?.videoUrl.orEmpty()
@@ -211,6 +212,10 @@ object LibraryCompat {
 
     private fun normalize(value: String): String {
         return value.trim().replace('\\', '/').trimEnd('/')
+    }
+
+    private fun isRemoteMedia(type: MediaLibType): Boolean {
+        return type == MediaLibType.WEBDAV || type == MediaLibType.SMB
     }
 
     fun loadPlaylist(sp: SpUtil): MutableList<MediaData> {

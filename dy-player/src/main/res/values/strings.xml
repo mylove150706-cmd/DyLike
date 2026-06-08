@@ -18,6 +18,8 @@
     <string name="hint_source_add">添加资源库</string>
     <string name="hint_source_dav_add">添加WebDav资源库</string>
     <string name="hint_source_dav_edit">修改WebDav资源库</string>
+    <string name="hint_source_smb_add">添加SMB资源库</string>
+    <string name="hint_source_smb_edit">修改SMB资源库</string>
     <string name="hint_source_dav_action">选择操作</string>
     <string name="hint_dav_site">站点链接</string>
     <string name="hint_dav_site_desc">例：http://localhost:5244/dav，非所有站点都需要/dav</string>
@@ -29,6 +31,18 @@
     <string name="hint_dav_password_desc">不填默认guest，请确认是否存在</string>
     <string name="hint_dav_status">连接状态</string>
     <string name="hint_dav_test">测试</string>
+    <string name="hint_smb_name_desc">可选，不填默认SMB资源库</string>
+    <string name="default_source_smb_name">SMB资源库</string>
+    <string name="hint_smb_server">服务器地址</string>
+    <string name="hint_smb_server_desc">例：192.168.1.10，也可填写 smb://192.168.1.10/share</string>
+    <string name="hint_smb_share">共享名称</string>
+    <string name="hint_smb_share_desc">例：video，不需要填写前后的斜杠</string>
+    <string name="hint_smb_port">端口</string>
+    <string name="hint_smb_port_desc">默认445</string>
+    <string name="hint_smb_domain">域/工作组</string>
+    <string name="hint_smb_domain_desc">可选，Windows/NAS 登录失败时可填写 WORKGROUP 或设备名</string>
+    <string name="hint_smb_username_desc">可选，不填使用访客/匿名访问</string>
+    <string name="hint_smb_password_desc">可选，不填为空密码</string>
     <string name="hint_version_message">最新公告</string>
     <string name="hint_version_update">版本更新</string>
     <string name="hint_version_null">无事发生，没事就想冒个泡</string>

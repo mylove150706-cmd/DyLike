@@ -3,7 +3,7 @@ package me.lingci.lib.player.exo.smb
 import jcifs.CIFSContext
 import jcifs.context.SingletonContext
 import jcifs.smb.NtlmPasswordAuthenticator
-import me.lingci.lib.base.util.Log
+import me.lingci.lib.base.storage.smb.SmbAuthToken
 
 object SmbAuthManager {
 
@@ -17,13 +17,17 @@ object SmbAuthManager {
      * @param domain 域名/工作组，通常传 null 或 "WORKGROUP"
      */
     fun getContext(username: String?, password: String?, domain: String? = null): CIFSContext {
-        Log.d(this, "smb", username, password)
-        return if (username == null) {
+        val credentials = SmbAuthToken.normalize(username, password, domain)
+        return if (credentials.username.isNullOrBlank()) {
             // 匿名登录
-            baseContext.withGuestCrendentials()
+            baseContext.withAnonymousCredentials()
         } else {
             // 账号密码登录
-            val auth = NtlmPasswordAuthenticator(domain, username, password)
+            val auth = NtlmPasswordAuthenticator(
+                credentials.domain,
+                credentials.username,
+                credentials.password.orEmpty()
+            )
             baseContext.withCredentials(auth)
         }
     }

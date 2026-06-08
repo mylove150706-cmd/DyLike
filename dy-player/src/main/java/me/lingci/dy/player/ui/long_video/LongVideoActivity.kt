@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lingci.dy.player.databinding.ActivityLongVideoBinding
+import me.lingci.dy.player.core.DyPlayerCore
 import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
@@ -77,6 +78,7 @@ import me.lingci.lib.player.capability.PlayerCapabilityProvider
 import me.lingci.lib.player.mediainfo.MediaInfoProviderOwner
 import xyz.doikki.videoplayer.player.BaseVideoView.OnStateChangeListener
 import xyz.doikki.videoplayer.player.VideoView
+import xyz.doikki.videoplayer.render.TextureRenderViewFactory
 import me.lingci.lib.player.util.SurfaceRenderTrace
 import me.lingci.lib.player.subtitle.SubtitleCueProvider
 import me.lingci.lib.player.track.ExternalTrackController
@@ -351,9 +353,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         videoView = binding.videoView
         // Apply the generic render preference first. MPV is allowed to override it below because
         // MPV playback requires its own Surface-backed render view.
-        if (spUtil.surfaceRender) {
-            videoView.setRenderViewFactory(SurfaceRenderViewFactory.create())
-        }
+        applyConfiguredRenderFactory()
         DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender)
         videoView.setOnPlayerInitializedListener { player ->
             // BaseVideoView may recreate the backend; reattach both Exo-only settings and common
@@ -458,6 +458,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         videoView.setVideoController(videoController)
         videoView.startFullScreen()
         updateTrackEntryByCapabilities()
+    }
+
+    private fun applyPlaybackCoreFor(videoBean: VideoData, playUrl: String) {
+        applyConfiguredRenderFactory()
+        val core = if (isSmbVideo(videoBean, playUrl)) DyPlayerCore.EXO else spUtil.dyPlayerCore
+        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender)
+    }
+
+    private fun applyConfiguredRenderFactory() {
+        if (spUtil.surfaceRender) {
+            videoView.setRenderViewFactory(SurfaceRenderViewFactory.create())
+        } else {
+            videoView.setRenderViewFactory(TextureRenderViewFactory.create())
+        }
+    }
+
+    private fun isSmbVideo(videoBean: VideoData, playUrl: String): Boolean {
+        return videoBean.type == StorageType.SMB || playUrl.startsWith("smb://", ignoreCase = true)
     }
 
     private fun initVideoListener() {
@@ -923,7 +941,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         mediaLastPlayedUpdateJob?.cancel()
         clearDmPanels()
         val videoBean = itemViewModel.getItem(position)
-        Log.d(this, "startPlay", position, videoBean.headers, videoBean.getToken())
+        Log.d(this, "startPlay", position, videoBean.name)
         logAndCache("LongVideoActivity", "D", "startPlay position=$position name=${videoBean.name} url=${videoBean.videoUrl}")
         lifecycleScope.launch(Dispatchers.IO) {
             videoBean.playUrl().let { playUrl ->
@@ -935,6 +953,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                     videoScaleControlView.resetValue()
                     PlayerInitializer.resetSpeed()
                     videoView.release()
+                    applyPlaybackCoreFor(videoBean, playUrl)
                     //mController.setTitle(videoBean.name)
                     longVideoControlView.setTitle(videoBean.name)
                     videoView.setUrl(
@@ -965,6 +984,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                     return@withContext
                 }
                 videoView.release()
+                applyPlaybackCoreFor(videoBean, playUrl)
                 videoView.setUrl(
                     playUrl,
                     if (videoBean.is302(playUrl).not()) videoBean.headers else mutableMapOf()
@@ -1035,14 +1055,12 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                     saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: 画面检测失败, PixelCopy result=$result size=${width}x$height")
                     return@request
                 }
-                val resultText = if (isMostlyBlack(bitmap)) {
-                    "无画面"
-                } else {
-                    "有画面"
+                val isMostlyBlack = isMostlyBlack(bitmap)
+                if (isMostlyBlack) {
+                    longVideoControlView.showSubTips("无画面")
                 }
-                longVideoControlView.showSubTips(resultText)
-                logAndCache("BlackScreenWatchdog", "D", "surface frame diagnostic token=$token result=$resultText size=${width}x$height")
-                saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: $resultText, PixelCopy success size=${width}x$height")
+                logAndCache("BlackScreenWatchdog", "D", "surface frame diagnostic token=$token result=$isMostlyBlack size=${width}x$height")
+                saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: $isMostlyBlack, PixelCopy success size=${width}x$height")
             }, Handler(Looper.getMainLooper()))
         } catch (e: Exception) {
             longVideoControlView.showSubTips("画面检测失败")
