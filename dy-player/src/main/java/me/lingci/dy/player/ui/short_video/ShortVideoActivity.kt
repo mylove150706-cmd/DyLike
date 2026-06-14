@@ -3,13 +3,9 @@ package me.lingci.dy.player.ui.short_video
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.RectF
 import android.os.Bundle
-import android.os.CountDownTimer
 import android.util.Log
 import android.view.View
-import android.view.ViewGroup
-import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
@@ -17,8 +13,6 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import androidx.viewpager2.widget.ViewPager2.OnPageChangeCallback
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.lingci.dy.player.R
@@ -28,47 +22,39 @@ import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
 import me.lingci.dy.player.ui.long_video.PlayHelper
-import me.lingci.dy.player.ui.long_video.PlayInfo
-import me.lingci.dy.player.ui.media_detail.RenameDialog
 import me.lingci.dy.player.util.AppUtil
 import me.lingci.dy.player.util.AppUtil.removeViewFormParent
-import me.lingci.dy.player.util.LibraryCompat
+import me.lingci.dy.player.util.ExternalSubtitleLoader
+import me.lingci.dy.player.util.MediaPlaybackRecorder
 import me.lingci.dy.player.util.MediaManger
 import me.lingci.dy.player.util.PlaybackErrorLogger
 import me.lingci.dy.player.util.PlaybackLogCache
+import me.lingci.dy.player.util.PlaybackTraceHelper
 import me.lingci.dy.player.util.SpUtil
+import me.lingci.dy.player.util.VideoListTempStore
 import me.lingci.dy.player.view.ShortVideoControlView
 import me.lingci.dy.player.view.ShortVideoController
-import me.lingci.lib.base.storage.IStorage
 import me.lingci.lib.base.storage.entity.StorageType
 import me.lingci.lib.base.ui.BaseActivity
-import me.lingci.lib.base.util.AppFile
 import me.lingci.lib.base.util.FileOperator
 import me.lingci.lib.base.util.HttpUtil
 import me.lingci.lib.base.util.JsonUtil
 import me.lingci.lib.base.util.createNew
-import me.lingci.lib.base.util.deleteExists
-import me.lingci.lib.base.util.dp
 import me.lingci.lib.base.util.isLocal
 import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.base.util.safeGetParcelableArrayList
 import me.lingci.lib.player.danmaku.PlayerInitializer
-import me.lingci.lib.player.view.SubtitleView
+import me.lingci.lib.player.subtitle.SubtitleCueProvider
+import me.lingci.lib.player.track.ExternalTrackController
 import me.lingci.lib.player.widget.component.SubtitleControlView
 import me.lingci.lib.player.widget.render.ShortVideoRenderViewFactory
 import me.lingci.lib.player.widget.videoview.CustomVideoView
 import xyz.doikki.videoplayer.player.BaseVideoView.OnStateChangeListener
 import xyz.doikki.videoplayer.player.VideoView
 import xyz.doikki.videoplayer.render.TextureRenderViewFactory
-import me.lingci.lib.player.util.SurfaceRenderTrace
-import me.lingci.lib.player.subtitle.SubtitleCueProvider
-import me.lingci.lib.player.track.ExternalTrackController
-import me.lingci.lib.player.track.ExternalTrackRequest
-import me.lingci.lib.player.track.MediaTrackType
 import java.io.File
 import java.io.FileOutputStream
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -81,7 +67,6 @@ class ShortVideoActivity : BaseActivity() {
     private val subtitleScaleFullScreen = 1.2f
 
     companion object {
-        private const val SUBTITLE_DOCK_TRACE_TAG = "SubtitleDockTrace"
         private const val KEY_LIST = "list"
         private const val KEY_INDEX = "index"
         private const val KEY_HISTORY = "history"
@@ -93,7 +78,6 @@ class ShortVideoActivity : BaseActivity() {
         private const val CONTROL_ALPHA_DIM_PROGRESS = 0.4f
         private const val CONTROL_ALPHA_RESTORE_VISIBLE_PROGRESS = 0.5f
         private const val CONTROL_ALPHA_RESTORE_DURATION = 160L
-        private const val MEDIA_LAST_PLAYED_UPDATE_DELAY_MS = 10_000L
 
         fun start(context: Context, list: ArrayList<VideoData>, index: Int, history: Boolean) {
             val i = Intent(context, ShortVideoActivity::class.java)
@@ -133,12 +117,8 @@ class ShortVideoActivity : BaseActivity() {
         }
 
         private fun start(context: Context, intent: Intent, list: ArrayList<VideoData>) {
-            val toJson = JsonUtil.toJsonString(list)
-            AppFile(context).buildCache(".data/${UUID.randomUUID()}.json").let { file ->
-                FileOperator.writeText(file, toJson)
-                intent.putExtra(KEY_TEMP, file.path)
-                context.startActivity(intent)
-            }
+            intent.putExtra(KEY_TEMP, VideoListTempStore.write(context, list))
+            context.startActivity(intent)
         }
     }
 
@@ -156,14 +136,48 @@ class ShortVideoActivity : BaseActivity() {
     private lateinit var mController: ShortVideoController
     private lateinit var subtitleControlView: SubtitleControlView
     private lateinit var mViewPagerImpl: RecyclerView
-    private lateinit var shortSettingsDialog: ShortSettingsDialog
+    private val shortSettingsDialog by lazy { ShortSettingsDialog() }
     private lateinit var shortCommentDialog: ShortCommentDialog
     private lateinit var shortMoreDialog: ShortMoreDialog
     private var activeShortVideoControlView: ShortVideoControlView? = null
     private val isUserScroll = AtomicBoolean(false)
     private val playbackLogCache = PlaybackLogCache()
-    private var mediaLastPlayedUpdateJob: Job? = null
-    private var mediaLastPlayedUpdated = false
+    private val mediaPlaybackRecorder by lazy { MediaPlaybackRecorder(spUtil) }
+    // 评论文件持久化和播放位置回写已下沉，Activity 只负责当前页计数刷新。
+    private val shortCommentController by lazy {
+        ShortCommentController(
+            context = this,
+            scope = lifecycleScope,
+            currentPlayPosition = { mVideoView.currentPosition },
+            updateCommentCount = ::updateCommentCount
+        )
+    }
+    // 定时关闭同时影响设置弹窗和当前控制条，统一交给 controller 维护剩余时间。
+    private val timerCloseController by lazy {
+        TimerCloseController(
+            activity = this,
+            settingsDialog = shortSettingsDialog,
+            activeControlView = { activeShortVideoControlView },
+            closeApp = ::closeApp
+        )
+    }
+    // 文件重命名/删除/分享涉及本地与远程存储解析，集中到独立 action 类处理。
+    private val shortVideoFileActions by lazy {
+        ShortVideoFileActions(
+            activity = this,
+            scope = lifecycleScope,
+            spUtil = spUtil,
+            mediaData = { mediaData },
+            videoList = mVideoList,
+            currentPosition = { mCurPos },
+            adapter = mShortVideoAdapter,
+            controller = mController,
+            currentControlView = { findCurrentShortVideoControlView() },
+            removeItem = ::removeItem
+        )
+    }
+    // 字幕停靠几何计算较重，拆出后 Activity 只在时机点触发刷新。
+    private lateinit var subtitleDockController: SubtitleDockController
 
     private fun getExternalTrackController(): ExternalTrackController? {
         return mVideoView.getPlayerCapability(ExternalTrackController::class.java)
@@ -172,10 +186,6 @@ class ShortVideoActivity : BaseActivity() {
     private fun getSubtitleCueProvider(): SubtitleCueProvider? {
         return mVideoView.getPlayerCapability(SubtitleCueProvider::class.java)
     }
-
-    private var countDownTimer: CountDownTimer? = null
-    private var timerCloseRemainingMillis: Long = 0L
-    private var timerCloseMinutes: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -190,23 +200,16 @@ class ShortVideoActivity : BaseActivity() {
     }
 
     private fun logAndCache(tag: String, level: String, message: String) {
-        playbackLogCache.add(tag, level, message)
-        Log.d(tag, message)
+        // 与长视频页共用同一套 trace 入口，便于后续统一排查播放问题。
+        PlaybackTraceHelper.logAndCache(playbackLogCache, tag, level, message)
     }
 
     private fun setupSurfaceTrace() {
-        SurfaceRenderTrace.enabled = spUtil.debugMode
-        SurfaceRenderTrace.sink = { tag, level, message ->
-            playbackLogCache.add(tag, level, message)
-            Log.d(tag, message)
-        }
+        PlaybackTraceHelper.setupSurfaceTrace(spUtil.debugMode, playbackLogCache)
     }
 
     private fun clearSurfaceTrace() {
-        if (SurfaceRenderTrace.sink != null) {
-            SurfaceRenderTrace.sink = null
-        }
-        SurfaceRenderTrace.enabled = false
+        PlaybackTraceHelper.clearSurfaceTrace()
     }
 
     private fun fromOpen() {
@@ -259,13 +262,9 @@ class ShortVideoActivity : BaseActivity() {
         }
         intent.getStringExtra(KEY_TEMP)?.let { path ->
             lifecycleScope.launch(Dispatchers.IO) {
-                val file = File(path)
-                FileOperator.readText(file).let { json ->
-                    file.deleteExists()
-                    val list = JsonUtil.toList<VideoData>(json).toMutableList()
-                    withContext(Dispatchers.Main) {
-                        initData(index, customRandom, random, list)
-                    }
+                val list = VideoListTempStore.readAndDelete(path).toMutableList()
+                withContext(Dispatchers.Main) {
+                    initData(index, customRandom, random, list)
                 }
             }
         }
@@ -307,7 +306,7 @@ class ShortVideoActivity : BaseActivity() {
             MediaManger.scanVideoThumb(baseContext, mVideoList.toList())
         }
 
-        shortSettingsDialog = ShortSettingsDialog()
+        //shortSettingsDialog = ShortSettingsDialog()
         shortCommentDialog = ShortCommentDialog()
         shortMoreDialog = ShortMoreDialog()
 
@@ -330,57 +329,14 @@ class ShortVideoActivity : BaseActivity() {
             mVideoView.start()
         }
         shortSettingsDialog.onTimerClose {
-            showTimerCloseDialog()
+            timerCloseController.showDialog()
         }
-        shortCommentDialog.onComment { videoId, item, playInfo ->
-            if (videoId.isBlank()) {
-                return@onComment null
-            }
-            item.style = "${mVideoView.currentPosition}"
-            var info = playInfo?.copy(playSeek = mVideoView.currentPosition)
-            if (info == null) {
-                info = PlayInfo(playSeek = mVideoView.currentPosition)
-            }
-            info.comments.add(item)
-            lifecycleScope.launch(Dispatchers.IO) {
-                AppFile(this@ShortVideoActivity).buildCustom("info", "${videoId}.json").writeText(
-                    JsonUtil.toJsonString(info)
-                )
-            }
-            updateCommentCount(info.comments.size)
-            info
-        }
-        shortCommentDialog.onDeleteComment { videoId, position, playInfo ->
-            if (videoId.isBlank() || playInfo == null) {
-                return@onDeleteComment null
-            }
-            val info = playInfo.copy(playSeek = mVideoView.currentPosition)
-            if (position in 0 until info.comments.size) {
-                info.comments.removeAt(position)
-            }
-            lifecycleScope.launch(Dispatchers.IO) {
-                AppFile(this@ShortVideoActivity).buildCustom("info", "${videoId}.json").writeText(
-                    JsonUtil.toJsonString(info)
-                )
-            }
-            updateCommentCount(info.comments.size)
-            info
-        }
+        // 评论弹窗只绑定一次，后续增删逻辑全部在 controller 内完成。
+        shortCommentController.bind(shortCommentDialog)
     }
 
     private fun loadCommentCount(videoId: String): Int {
-        return try {
-            val file = AppFile(this@ShortVideoActivity).buildCustom("info", "${videoId}.json")
-            if (file.exists() && file.canRead()) {
-                val info = JsonUtil.toEntity<PlayInfo>(file.readText())
-                info.comments.size
-            } else {
-                0
-            }
-        } catch (e: Exception) {
-            logD("loadCommentCount failed", e.message)
-            0
-        }
+        return shortCommentController.loadCommentCount(videoId)
     }
 
     private fun updateCommentCount(count: Int) {
@@ -401,6 +357,13 @@ class ShortVideoActivity : BaseActivity() {
         mVideoView.setLooping(PlayerInitializer.Player.shortAutoNext.not())
         mController = ShortVideoController(this)
         subtitleControlView = SubtitleControlView(this)
+        // 停靠策略依赖当前 render view 和方向信息，因此在字幕组件初始化后立刻创建 controller。
+        subtitleDockController = SubtitleDockController(
+            context = this,
+            videoView = mVideoView,
+            subtitleControlView = subtitleControlView,
+            currentPosition = { mCurPos }
+        )
         //subtitleControlView.setSubtitleAbsoluteTextSize(32f)
         subtitleControlView.setSubtitleScale(subtitleScaleNormal)
         mController.addControlComponent(subtitleControlView)
@@ -552,15 +515,15 @@ class ShortVideoActivity : BaseActivity() {
                 if (!shortMoreDialog.isAdded) {
                     shortMoreDialog.setMoreActionListener(object : ShortMoreDialog.OnMoreActionListener {
                         override fun onRename() {
-                            this@ShortVideoActivity.showRenameDialog()
+                            shortVideoFileActions.showRenameDialog()
                         }
 
                         override fun onDelete() {
-                            this@ShortVideoActivity.showDeleteConfirmDialog()
+                            shortVideoFileActions.showDeleteConfirmDialog()
                         }
 
                         override fun onShare() {
-                            this@ShortVideoActivity.shareVideo()
+                            shortVideoFileActions.shareVideo()
                         }
                     })
                     shortMoreDialog.show(supportFragmentManager, shortMoreDialog.tag)
@@ -631,7 +594,7 @@ class ShortVideoActivity : BaseActivity() {
     }
 
     private fun startPlay(position: Int) {
-        mediaLastPlayedUpdateJob?.cancel()
+        mediaPlaybackRecorder.cancelLastPlayedUpdate()
         val count = mViewPagerImpl.childCount
         for (i in 0 until count) {
             val itemView = mViewPagerImpl.getChildAt(i)
@@ -723,233 +686,37 @@ class ShortVideoActivity : BaseActivity() {
     }
 
     private fun addExternalSubtitle(file: File): Boolean {
-        // Exo implements this as an external subtitle source; MPV implements it as native sub-add.
-        val success = getExternalTrackController()?.addExternalTrack(
-            ExternalTrackRequest(
-                type = MediaTrackType.SUBTITLE,
-                uri = file.toUri(),
-                title = file.name,
-                selectAfterAdd = true
-            )
-        ) == true
-        if (success) {
-            // No-op for MPV because it does not expose SubtitleCueProvider.
-            getSubtitleCueProvider()?.setSubtitleCueListener(subtitleControlView::onSubtitleCues)
-        }
-        return success
+        // 外挂字幕接入走共享 helper，长短视频页保持一致的选轨与 cue 绑定行为。
+        return ExternalSubtitleLoader.addSubtitle(
+            externalTrackController = getExternalTrackController(),
+            subtitleCueProvider = getSubtitleCueProvider(),
+            subtitleControlView = subtitleControlView,
+            uri = file.toUri(),
+            title = file.name
+        )
     }
 
     private fun clearSubtitleCueListener() {
-        getSubtitleCueProvider()?.setSubtitleCueListener(null)
+        ExternalSubtitleLoader.clearCueListener(getSubtitleCueProvider())
     }
 
     private fun updateSubtitleDocking() {
-        if (!::subtitleControlView.isInitialized) {
+        if (!::subtitleDockController.isInitialized) {
             return
         }
-        mVideoView.post {
-            val subtitleWidth = subtitleControlView.width
-            val subtitleHeight = subtitleControlView.height
-            if (subtitleWidth <= 0 || subtitleHeight <= 0) {
-                traceSubtitleDockDecision(
-                    reason = "host-not-ready",
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            if (mVideoView.isFullScreen || resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                traceSubtitleDockDecision(
-                    reason = if (mVideoView.isFullScreen) "fullscreen" else "landscape-ui",
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            val videoSize = mVideoView.videoSize
-            val videoWidth = videoSize.getOrNull(0) ?: 0
-            val videoHeight = videoSize.getOrNull(1) ?: 0
-            if (videoWidth <= 0 || videoHeight <= 0 || videoWidth < videoHeight) {
-                traceSubtitleDockDecision(
-                    reason = if (videoWidth <= 0 || videoHeight <= 0) "video-size-invalid" else "portrait-video",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            val playerContainer = mVideoView.getChildAt(0) as? ViewGroup ?: run {
-                traceSubtitleDockDecision(
-                    reason = "player-container-missing",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            val renderView = mVideoView.getRenderTransformView() ?: playerContainer.getChildAt(0) ?: run {
-                traceSubtitleDockDecision(
-                    reason = "render-view-missing",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = playerContainer.width,
-                    containerHeight = playerContainer.height
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            if (renderView.width <= 0 || renderView.height <= 0) {
-                traceSubtitleDockDecision(
-                    reason = "render-not-ready",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = playerContainer.width,
-                    containerHeight = playerContainer.height,
-                    renderWidth = renderView.width,
-                    renderHeight = renderView.height
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-
-            val containerWidth = playerContainer.width
-            val containerHeight = playerContainer.height
-            if (containerHeight <= 0) {
-                traceSubtitleDockDecision(
-                    reason = "container-not-ready",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = containerWidth,
-                    containerHeight = containerHeight,
-                    renderWidth = renderView.width,
-                    renderHeight = renderView.height
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-
-            // 字幕停靠依赖当前 renderView 的真实几何边界，这样缩放和平移后仍然贴着画面底边。
-            val renderBounds = calculateRenderBoundsInParent(renderView, playerContainer)
-            if (renderBounds.isEmpty) {
-                traceSubtitleDockDecision(
-                    reason = "render-bounds-empty",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = containerWidth,
-                    containerHeight = containerHeight,
-                    renderWidth = renderView.width,
-                    renderHeight = renderView.height,
-                    renderBounds = renderBounds
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            val dockingTop = renderBounds.bottom.coerceIn(0f, containerHeight.toFloat()).toInt()
-            val bottomBarHeight = (containerHeight - dockingTop).coerceAtLeast(0)
-            val minDockHeight = if (videoWidth == videoHeight) 28f.dp.toInt() else 56f.dp.toInt()
-            if (bottomBarHeight < minDockHeight) {
-                traceSubtitleDockDecision(
-                    reason = "bottom-bar-too-small",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = containerWidth,
-                    containerHeight = containerHeight,
-                    renderWidth = renderView.width,
-                    renderHeight = renderView.height,
-                    renderBounds = renderBounds,
-                    dockingTop = dockingTop,
-                    bottomBarHeight = bottomBarHeight,
-                    minDockHeight = minDockHeight
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-
-            val boundsTop = dockingTop.coerceIn(0, subtitleHeight)
-            val boundsBottom = subtitleHeight
-            if (boundsBottom <= boundsTop) {
-                traceSubtitleDockDecision(
-                    reason = "layout-bounds-invalid",
-                    videoWidth = videoWidth,
-                    videoHeight = videoHeight,
-                    subtitleWidth = subtitleWidth,
-                    subtitleHeight = subtitleHeight,
-                    containerWidth = containerWidth,
-                    containerHeight = containerHeight,
-                    renderWidth = renderView.width,
-                    renderHeight = renderView.height,
-                    renderBounds = renderBounds,
-                    dockingTop = dockingTop,
-                    bottomBarHeight = bottomBarHeight,
-                    minDockHeight = minDockHeight,
-                    layoutBounds = intArrayOf(0, boundsTop, subtitleWidth, boundsBottom)
-                )
-                resetSubtitleDocking()
-                return@post
-            }
-            subtitleControlView.setSubtitleDockMode(SubtitleView.DOCK_MODE_BOTTOM_BAR)
-            subtitleControlView.setSubtitleLayoutBounds(0, boundsTop, subtitleWidth, boundsBottom)
-            traceSubtitleDockDecision(
-                reason = "apply-bottom-bar",
-                videoWidth = videoWidth,
-                videoHeight = videoHeight,
-                subtitleWidth = subtitleWidth,
-                subtitleHeight = subtitleHeight,
-                containerWidth = containerWidth,
-                containerHeight = containerHeight,
-                renderWidth = renderView.width,
-                renderHeight = renderView.height,
-                renderBounds = renderBounds,
-                dockingTop = dockingTop,
-                bottomBarHeight = bottomBarHeight,
-                minDockHeight = minDockHeight,
-                layoutBounds = intArrayOf(0, boundsTop, subtitleWidth, boundsBottom),
-                dockMode = SubtitleView.DOCK_MODE_BOTTOM_BAR
-            )
-        }
+        // Activity 只决定刷新时机，几何判断与 trace 输出都由 controller 负责。
+        subtitleDockController.update()
     }
 
     private fun applySubtitleTextSizeForPlayerState(playerState: Int) {
-        if (!::subtitleControlView.isInitialized) {
+        if (!::subtitleDockController.isInitialized) {
             return
         }
-        val scale = if (playerState == VideoView.PLAYER_FULL_SCREEN) {
-            subtitleScaleFullScreen
-        } else {
-            subtitleScaleNormal
-        }
-        subtitleControlView.setSubtitleScale(scale)
-    }
-
-    private fun resetSubtitleDocking() {
-        subtitleControlView.setSubtitleDockMode(SubtitleView.DOCK_MODE_NORMAL)
-        subtitleControlView.clearSubtitleLayoutBounds()
-    }
-
-    private fun calculateRenderBoundsInParent(renderView: View, parent: View): RectF {
-        // renderView 是 playerContainer 的直接子 View，使用父容器局部坐标可避免把位移重复算两次。
-        val rect = RectF(0f, 0f, renderView.width.toFloat(), renderView.height.toFloat())
-        val matrix = android.graphics.Matrix(renderView.matrix)
-        matrix.mapRect(rect)
-        rect.offset(renderView.left.toFloat(), renderView.top.toFloat())
-        rect.intersect(0f, 0f, parent.width.toFloat(), parent.height.toFloat())
-        return rect
+        subtitleDockController.applyTextSizeForPlayerState(
+            playerState = playerState,
+            normalScale = subtitleScaleNormal,
+            fullScreenScale = subtitleScaleFullScreen
+        )
     }
 
     private fun findCurrentShortVideoControlView(): ShortVideoControlView? {
@@ -1011,61 +778,6 @@ class ShortVideoActivity : BaseActivity() {
                 view.alpha = CONTROL_ALPHA_FULL
             }
         }
-    }
-
-    private fun traceSubtitleDockDecision(
-        reason: String,
-        videoWidth: Int = 0,
-        videoHeight: Int = 0,
-        subtitleWidth: Int = 0,
-        subtitleHeight: Int = 0,
-        containerWidth: Int = 0,
-        containerHeight: Int = 0,
-        renderWidth: Int = 0,
-        renderHeight: Int = 0,
-        renderBounds: RectF? = null,
-        dockingTop: Int = -1,
-        bottomBarHeight: Int = -1,
-        minDockHeight: Int = -1,
-        layoutBounds: IntArray? = null,
-        dockMode: Int = subtitleControlView.getDockMode()
-    ) {
-        me.lingci.lib.base.util.Log.d(
-            SUBTITLE_DOCK_TRACE_TAG,
-            "event=subtitle_dock_update",
-            "reason=$reason",
-            "curPos=$mCurPos",
-            "playerState=${if (mVideoView.isFullScreen) "fullscreen" else "normal"}",
-            "orientation=${if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "landscape" else "portrait"}",
-            "video=${videoWidth}x${videoHeight}",
-            "subtitleHost=${subtitleWidth}x${subtitleHeight}",
-            "container=${containerWidth}x${containerHeight}",
-            "render=${renderWidth}x${renderHeight}",
-            "renderBounds=${formatRectF(renderBounds)}",
-            "dockTop=$dockingTop",
-            "bottomBar=$bottomBarHeight",
-            "minDock=$minDockHeight",
-            "layout=${formatBounds(layoutBounds)}",
-            "dockMode=${formatDockMode(dockMode)}"
-        )
-    }
-
-    private fun formatRectF(rect: RectF?): String {
-        if (rect == null) {
-            return "null"
-        }
-        return "[${rect.left.toInt()},${rect.top.toInt()},${rect.right.toInt()},${rect.bottom.toInt()}]"
-    }
-
-    private fun formatBounds(bounds: IntArray?): String {
-        if (bounds == null || bounds.size < 4) {
-            return "null"
-        }
-        return "[${bounds[0]},${bounds[1]},${bounds[2]},${bounds[3]}]"
-    }
-
-    private fun formatDockMode(mode: Int): String {
-        return if (mode == SubtitleView.DOCK_MODE_BOTTOM_BAR) "bottom_bar" else "normal"
     }
 
     fun addData(list: List<VideoData>) {
@@ -1142,41 +854,17 @@ class ShortVideoActivity : BaseActivity() {
     }
 
     private fun saveMediaInfo(url: String) {
-        mediaData?.let { media ->
-            media.playLast = url
-            val sourceList = LibraryCompat.loadSources(spUtil)
-            LibraryCompat.loadMedia(spUtil).let { dataSet ->
-                val index = dataSet.indexOfFirst { LibraryCompat.sameMedia(it, media, sourceList) }
-                if (index > -1) {
-                    dataSet[index] = media
-                    logD("lastPlay", media)
-                    LibraryCompat.saveMedia(spUtil, dataSet)
-                }
-            }
-        }
+        mediaPlaybackRecorder.saveLastPlayedUrl(mediaData, url)
     }
 
     private fun scheduleMediaLastPlayedUpdate(position: Int) {
-        if (mediaLastPlayedUpdated) return
-        val mediaId = mediaData?.id?.takeIf { it.isNotBlank() } ?: return
-        mediaLastPlayedUpdateJob?.cancel()
-        mediaLastPlayedUpdateJob = lifecycleScope.launch {
-            delay(MEDIA_LAST_PLAYED_UPDATE_DELAY_MS)
-            if (mediaLastPlayedUpdated || position != mCurPos) return@launch
-            if (mVideoView.currentPlayState != VideoView.STATE_PLAYING) return@launch
-            withContext(Dispatchers.IO) {
-                updateMediaLastPlayedAt(mediaId)
-            }
-            mediaLastPlayedUpdated = true
-        }
-    }
-
-    private fun updateMediaLastPlayedAt(mediaId: String) {
-        val list = LibraryCompat.loadMedia(spUtil)
-        list.find { it.id == mediaId }?.let { media ->
-            media.lastPlayedAt = System.currentTimeMillis()
-            LibraryCompat.saveMedia(spUtil, list)
-        }
+        mediaPlaybackRecorder.scheduleLastPlayedAtUpdate(
+            scope = lifecycleScope,
+            mediaData = mediaData,
+            position = position,
+            currentPosition = { mCurPos },
+            currentPlayState = { mVideoView.currentPlayState }
+        )
     }
 
     override fun onResume() {
@@ -1184,10 +872,7 @@ class ShortVideoActivity : BaseActivity() {
         if (::mVideoView.isInitialized) {
             mVideoView.resume()
         }
-        if (timerCloseRemainingMillis > 0) {
-            val remainingMinutes = (timerCloseRemainingMillis / 60_000L).toInt().coerceAtLeast(1)
-            startTimerClose(remainingMinutes)
-        }
+        timerCloseController.onResume()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -1209,13 +894,13 @@ class ShortVideoActivity : BaseActivity() {
         if (::mVideoView.isInitialized) {
             mVideoView.pause()
         }
-        countDownTimer?.cancel()
+        timerCloseController.onPause()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mediaLastPlayedUpdateJob?.cancel()
-        cancelTimerClose()
+        mediaPlaybackRecorder.release()
+        timerCloseController.release()
         activeShortVideoControlView?.setOnVideoTransformChangedListener(null)
         if (::mVideoView.isInitialized) {
             mVideoView.release()
@@ -1224,228 +909,9 @@ class ShortVideoActivity : BaseActivity() {
         playbackLogCache.clear()
     }
 
-    private fun showTimerCloseDialog() {
-        val timerDialog = TimerCloseDialog.newInstance(timerCloseMinutes)
-        timerDialog.onTimerSelected { minutes ->
-            if (minutes > 0) {
-                timerCloseMinutes = minutes
-                startTimerClose(minutes)
-            } else {
-                timerCloseMinutes = 0
-                cancelTimerClose()
-            }
-        }
-        if (!timerDialog.isAdded) {
-            timerDialog.show(supportFragmentManager, timerDialog.tag)
-        }
-    }
-
-    private fun startTimerClose(minutes: Int) {
-        cancelTimerClose()
-        timerCloseRemainingMillis = minutes * 60_000L
-        countDownTimer = object : CountDownTimer(timerCloseRemainingMillis, 1000) {
-            override fun onTick(millisUntilFinished: Long) {
-                timerCloseRemainingMillis = millisUntilFinished
-                updateTimerCloseDisplay(millisUntilFinished)
-            }
-
-            override fun onFinish() {
-                timerCloseRemainingMillis = 0
-                timerCloseMinutes = 0
-                updateTimerCloseDisplay(0)
-                closeApp()
-            }
-        }.start()
-        updateTimerCloseDisplay(timerCloseRemainingMillis)
-    }
-
-    private fun cancelTimerClose() {
-        countDownTimer?.cancel()
-        countDownTimer = null
-        timerCloseRemainingMillis = 0
-        timerCloseMinutes = 0
-        updateTimerCloseDisplay(0)
-    }
-
-    private fun updateTimerCloseDisplay(millisUntilFinished: Long) {
-        activeShortVideoControlView?.updateTimerCloseDisplay(millisUntilFinished)
-        val statusText = if (millisUntilFinished > 0) {
-            val min = millisUntilFinished / 60_000
-            val sec = (millisUntilFinished / 1000) % 60
-            String.format("%d:%02d", min, sec)
-        } else {
-            getString(R.string.timer_off)
-        }
-        shortSettingsDialog.updateTimerCloseStatus(statusText)
-    }
-
     private fun closeApp() {
         mVideoView.release()
         finishAffinity()
-    }
-
-    private fun showRenameDialog() {
-        if (mCurPos !in mVideoList.indices) return
-        val videoData = mVideoList[mCurPos]
-        val extension = videoData.videoUrl.substringAfterLast(".", "")
-        val renameDialog = RenameDialog()
-        renameDialog.arguments = RenameDialog.buildData(videoData.name)
-        renameDialog.onRenameListener { newName ->
-            renameVideo(mCurPos, "${newName}.${extension}")
-        }
-        renameDialog.show(supportFragmentManager, renameDialog.tag)
-    }
-
-    private fun renameVideo(position: Int, newName: String) {
-        if (position !in mVideoList.indices) return
-        val videoData = mVideoList[position]
-        val oldPath = videoData.videoUrl
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            val success = try {
-                val storage = resolveStorage(videoData)
-                if (storage != null) {
-                    storage.rename(oldPath, newName)
-                } else {
-                    val oldFile = File(oldPath)
-                    if (oldFile.exists()) {
-                        val parent = oldFile.parentFile ?: return@launch
-                        oldFile.renameTo(File(parent, newName))
-                    } else {
-                        false
-                    }
-                }
-            } catch (e: Exception) {
-                logD("renameVideo failed", e.message)
-                false
-            }
-
-            withContext(Dispatchers.Main) {
-                if (success) {
-                    val dotIndex = oldPath.lastIndexOf(".")
-                    val newPath = if (dotIndex > 0) {
-                        oldPath.substring(0, oldPath.lastIndexOf("/") + 1) + newName
-                    } else {
-                        oldPath.substring(0, oldPath.lastIndexOf("/") + 1) + newName
-                    }
-                    videoData.name = newName
-                    videoData.videoUrl = newPath
-                    mShortVideoAdapter.notifyItemChanged(position)
-                    findCurrentShortVideoControlView()?.setTitle(newName)
-                    mController.setTitle(newName)
-                    Toast.makeText(this@ShortVideoActivity, getString(R.string.action_rename) + "成功", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this@ShortVideoActivity, getString(R.string.action_rename) + "失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    private fun showDeleteConfirmDialog() {
-        if (mCurPos !in mVideoList.indices) return
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle(R.string.hint_delete_video)
-            .setMessage(R.string.hint_delete_video_desc)
-            .setPositiveButton(android.R.string.ok) { _, _ ->
-                deleteVideo(mCurPos)
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
-    private fun deleteVideo(position: Int) {
-        if (position !in mVideoList.indices) return
-        val videoData = mVideoList[position]
-        val path = videoData.videoUrl
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            val success = try {
-                val storage = resolveStorage(videoData)
-                if (storage != null) {
-                    storage.delete(path)
-                } else {
-                    val file = File(path)
-                    if (file.exists()) file.delete() else true
-                }
-            } catch (e: Exception) {
-                logD("deleteVideo failed", e.message)
-                false
-            }
-
-            withContext(Dispatchers.Main) {
-                if (success) {
-                    removeItem(position)
-                    Toast.makeText(this@ShortVideoActivity, getString(R.string.action_delete) + "成功", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this@ShortVideoActivity, getString(R.string.action_delete) + "失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    private fun shareVideo() {
-        if (mCurPos !in mVideoList.indices) return
-        val videoData = mVideoList[mCurPos]
-
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val file = if (videoData.videoUrl.startsWith("/") || videoData.videoUrl.startsWith("file://")) {
-                    File(videoData.videoUrl)
-                } else {
-                    val cacheFile = File(externalCacheDir, "share/${videoData.name}")
-                    if (!cacheFile.exists()) {
-                        cacheFile.parentFile?.mkdirs()
-                        val storage = resolveStorage(videoData)
-                        if (storage != null) {
-                            storage.download(videoData.videoUrl, cacheFile.absolutePath)
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                Toast.makeText(this@ShortVideoActivity, "无法分享远程文件", Toast.LENGTH_SHORT).show()
-                            }
-                            return@launch
-                        }
-                    }
-                    cacheFile
-                }
-
-                if (!file.exists()) {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(this@ShortVideoActivity, "文件不存在", Toast.LENGTH_SHORT).show()
-                    }
-                    return@launch
-                }
-
-                val uri = androidx.core.content.FileProvider.getUriForFile(
-                    this@ShortVideoActivity,
-                    "${packageName}.provider",
-                    file
-                )
-                val intent = Intent(Intent.ACTION_SEND).apply {
-                    type = "video/*"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                withContext(Dispatchers.Main) {
-                    startActivity(Intent.createChooser(intent, getString(R.string.hint_share_video)))
-                }
-            } catch (e: Exception) {
-                logD("shareVideo failed", e.message)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@ShortVideoActivity, getString(R.string.action_share) + "失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    private fun resolveStorage(videoData: VideoData): IStorage? {
-        val sourceList = LibraryCompat.loadSources(spUtil)
-        val storageId = mediaData?.let { LibraryCompat.effectiveStorageId(it, sourceList) }
-        val source = if (storageId != null) {
-            sourceList.find { it.id == storageId }
-        } else {
-            sourceList.find { it.type == videoData.type }
-        }
-        return source?.toStorage()
     }
 
 }

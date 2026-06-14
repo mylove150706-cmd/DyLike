@@ -2,16 +2,8 @@ package me.lingci.dy.player.ui.long_video
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Color
-import android.graphics.Typeface
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.view.PixelCopy
-import android.view.SurfaceView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.viewModels
 import androidx.core.net.toUri
@@ -28,30 +20,23 @@ import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
 import me.lingci.dy.player.util.AppUtil
-import me.lingci.dy.player.util.LibraryCompat
+import me.lingci.dy.player.util.ExternalSubtitleLoader
+import me.lingci.dy.player.util.MediaPlaybackRecorder
+import me.lingci.dy.player.util.PlaybackTraceHelper
 import me.lingci.dy.player.util.PlaybackLogCache
 import me.lingci.dy.player.util.SpUtil
+import me.lingci.dy.player.util.VideoListTempStore
 import me.lingci.dy.player.view.LongVideoControlView
 import me.lingci.lib.base.entity.TitleItem
 import me.lingci.lib.base.storage.entity.FileEntity
 import me.lingci.lib.base.storage.entity.StorageType
 import me.lingci.lib.base.ui.BaseActivity
 import me.lingci.lib.base.util.AppFile
-import me.lingci.lib.base.util.DensityCalculator
 import me.lingci.lib.base.util.FileOperator
-import me.lingci.lib.base.util.JsonUtil
 import me.lingci.lib.base.util.Log
 import me.lingci.lib.base.util.ToastUtil
-import me.lingci.lib.base.util.deleteExists
 import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
-import me.lingci.lib.dm.view.common.DmInitializer
-import me.lingci.lib.dm.view.entity.DmTrack
-import me.lingci.lib.dm.view.entity.DmTrackMode
-import me.lingci.lib.dm.view.entity.xml.DmItem
-import me.lingci.lib.dm.view.util.XmlConverter
-import me.lingci.lib.dm.view.util.XmlMerger
-import me.lingci.lib.dm.view.util.ZipXmlLoader
 import me.lingci.lib.player.danmaku.PlayerInitializer
 import me.lingci.lib.player.exo.CustomExoMediaPlayer
 import me.lingci.lib.player.listener.OnFontChangeListener
@@ -76,26 +61,16 @@ import xyz.doikki.videocontroller.component.GestureView
 import me.lingci.lib.player.capability.PlayerCapabilities
 import me.lingci.lib.player.capability.PlayerCapabilityProvider
 import me.lingci.lib.player.mediainfo.MediaInfoProviderOwner
+import me.lingci.lib.player.subtitle.SubtitleCueProvider
+import me.lingci.lib.player.track.ExternalTrackController
+import me.lingci.lib.player.track.MediaTrackController
+import me.lingci.lib.player.track.MediaTrackProvider
+import me.lingci.lib.player.track.MediaTrackSnapshot
 import xyz.doikki.videoplayer.player.BaseVideoView.OnStateChangeListener
 import xyz.doikki.videoplayer.player.VideoView
 import xyz.doikki.videoplayer.render.TextureRenderViewFactory
-import me.lingci.lib.player.util.SurfaceRenderTrace
-import me.lingci.lib.player.subtitle.SubtitleCueProvider
-import me.lingci.lib.player.track.ExternalTrackController
-import me.lingci.lib.player.track.ExternalTrackRequest
-import me.lingci.lib.player.track.MediaTrack
-import me.lingci.lib.player.track.MediaTrackController
-import me.lingci.lib.player.track.MediaTrackKey
-import me.lingci.lib.player.track.MediaTrackProvider
-import me.lingci.lib.player.track.MediaTrackSnapshot
-import me.lingci.lib.player.track.MediaTrackType
 import xyz.doikki.videoplayer.util.PlayerUtils
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
-import androidx.core.graphics.createBitmap
 
 /**
  * 长视频播放页
@@ -108,9 +83,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         private const val KEY_INDEX = "index"
         private const val KEY_HISTORY = "history"
         private const val KEY_TEMP = "temp"
-        private const val BLACK_SCREEN_CHECK_DELAY_MS = 5000L
         private const val BACKGROUND_RECOVERY_WINDOW_MS = 5000L
-        private const val MEDIA_LAST_PLAYED_UPDATE_DELAY_MS = 10_000L
 
         fun start(context: Context, list: ArrayList<VideoData>, index: Int, history: Boolean) {
             val bundle = bundleOf()
@@ -133,14 +106,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         }
 
         private fun start(context: Context, bundle: Bundle, list: ArrayList<VideoData>) {
-            val toJson = JsonUtil.toJsonString(list)
-            AppFile(context).buildCache(".data/${UUID.randomUUID()}.json").let { file ->
-                FileOperator.writeText(file, toJson)
-                bundle.putString(KEY_TEMP, file.path)
-                val intent = Intent(context, LongVideoActivity::class.java)
-                intent.putExtra(KEY_BUNDLE, bundle)
-                context.startActivity(intent)
-            }
+            bundle.putString(KEY_TEMP, VideoListTempStore.write(context, list))
+            val intent = Intent(context, LongVideoActivity::class.java)
+            intent.putExtra(KEY_BUNDLE, bundle)
+            context.startActivity(intent)
         }
     }
 
@@ -166,13 +135,59 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private lateinit var mTrackPanelControlView: TrackPanelControlView
     private lateinit var speedControlView: SpeedControlView
     private lateinit var mediaInfoControlView: MediaInfoControlView
-    private var mediaTrackSnapshot = MediaTrackSnapshot()
     private val playbackLogCache = PlaybackLogCache()
-    private var blackScreenWatchJob: Job? = null
-    private var blackScreenWatchToken = 0L
+    // 只负责调试态起播黑屏诊断，后台恢复策略仍留在 Activity 内统一编排。
+    private val blackScreenWatchdog by lazy {
+        BlackScreenWatchdog(
+            context = this,
+            scope = lifecycleScope,
+            videoView = videoView,
+            playbackLogCache = playbackLogCache,
+            currentPosition = { mCurPos },
+            showSubTips = { longVideoControlView.showSubTips(it) },
+            logAndCache = ::logAndCache
+        )
+    }
     private var backgroundRecoveryJob: Job? = null
-    private var mediaLastPlayedUpdateJob: Job? = null
-    private var mediaLastPlayedUpdated = false
+    private val mediaPlaybackRecorder by lazy { MediaPlaybackRecorder(spUtil) }
+    // 轨道能力查询仍依赖当前 videoView，面板交互和字幕 cue 开关交给 controller。
+    private val longTrackPanelController by lazy {
+        LongTrackPanelController(
+            spUtil = spUtil,
+            trackPanelControlView = mTrackPanelControlView,
+            longVideoControlView = longVideoControlView,
+            subtitleControlView = subtitleControlView,
+            getCapabilities = ::getPlayerCapabilities,
+            getMediaTrackController = ::getMediaTrackController,
+            hasSubtitleCueProvider = { getSubtitleCueProvider() != null },
+            addExternalSubtitle = ::addExternalSubtitle,
+            attachSubtitleCueListener = ::attachSubtitleCueListener,
+            clearSubtitleCueListener = ::clearSubtitleCueListener
+        )
+    }
+    // Activity 只提供当前视频和播放页回调，弹幕文件解析/合并/恢复交给 controller。
+    private val longDanmakuController by lazy {
+        LongDanmakuController(
+            context = this,
+            scope = lifecycleScope,
+            spUtil = spUtil,
+            danmakuView = danmakuView,
+            dmSelectView = dmSelectView,
+            dmConfView = dmConfView,
+            dmTrackView = dmTrackView,
+            dmListView = dmListView,
+            longVideoControlView = longVideoControlView,
+            videoView = videoView,
+            currentVideoData = {
+                if (itemViewModel.getItemSize() > mCurPos) itemViewModel.getItem(mCurPos) else null
+            },
+            currentVideoName = {
+                if (itemViewModel.getItemSize() > mCurPos) itemViewModel.getItem(mCurPos).name else ""
+            },
+            isMerge = itemViewModel::isMerge,
+            setMergeState = itemViewModel::setMergeState
+        )
+    }
     private var hasPausedForBackgroundRecovery = false
     private var lastKnownPlaybackPosition = 0L
 
@@ -204,23 +219,16 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
 
     private fun logAndCache(tag: String, level: String, message: String) {
-        playbackLogCache.add(tag, level, message)
-        Log.d(tag, message)
+        // 统一走共享 trace helper，保证页面日志与诊断缓存格式一致。
+        PlaybackTraceHelper.logAndCache(playbackLogCache, tag, level, message)
     }
 
     private fun setupSurfaceTrace() {
-        SurfaceRenderTrace.enabled = spUtil.debugMode
-        SurfaceRenderTrace.sink = { tag, level, message ->
-            playbackLogCache.add(tag, level, message)
-            Log.d(tag, message)
-        }
+        PlaybackTraceHelper.setupSurfaceTrace(spUtil.debugMode, playbackLogCache)
     }
 
     private fun clearSurfaceTrace() {
-        if (SurfaceRenderTrace.sink != null) {
-            SurfaceRenderTrace.sink = null
-        }
-        SurfaceRenderTrace.enabled = false
+        PlaybackTraceHelper.clearSurfaceTrace()
     }
 
     // ===== 后台恢复重试相关状态 ===== // track-id: bg-retry-20260421
@@ -275,10 +283,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             outState.putInt(KEY_INDEX, mCurPos)
             outState.putBoolean(KEY_HISTORY, onHistory)
             outState.putParcelable(KEY_MEDIA, itemViewModel.getMediaData())
-            AppFile(this).buildCache(".data/${UUID.randomUUID()}.json").let { file ->
-                FileOperator.writeText(file, JsonUtil.toJsonString(itemViewModel.getData()))
-                outState.putString(KEY_TEMP, file.path)
-            }
+            outState.putString(KEY_TEMP, VideoListTempStore.write(this, itemViewModel.getData()))
         }
     }
 
@@ -322,13 +327,9 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         onHistory = bundle?.getBoolean(KEY_HISTORY, false)?: false
         bundle?.getString(KEY_TEMP)?.let { path ->
             lifecycleScope.launch(Dispatchers.IO) {
-                val file = File(path)
-                FileOperator.readText(file).let { json ->
-                    file.deleteExists()
-                    val list = JsonUtil.toList<VideoData>(json)
-                    withContext(Dispatchers.Main) {
-                        itemViewModel.addAll(list)
-                    }
+                val list = VideoListTempStore.readAndDelete(path)
+                withContext(Dispatchers.Main) {
+                    itemViewModel.addAll(list)
                 }
             }
         }
@@ -422,30 +423,6 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         videoController.addControlComponent(subtitleControlView)
         // 弹幕
         danmakuView = DanmakuControlView(this)
-        setDmFont()
-        danmakuView.toggleVis(spUtil.showDm)
-        danmakuView.showFps(spUtil.showDmFps)
-        danmakuView.setStrokeMultiple(spUtil.dmStrokeMultiple)
-        danmakuView.updateTextBold(spUtil.dmBold)
-        danmakuView.setDmGradient(spUtil.dmGradientMode, spUtil.dmGradientRatio)
-        danmakuView.setGradientWithTextColor(spUtil.dmGradientWithTextColor)
-        danmakuView.setMergeOption(
-            spUtil.dmShowTime,
-            spUtil.dmMergeMode,
-            spUtil.dmMergeShow,
-            spUtil.dmMergeTop,
-            spUtil.debugMode
-        )
-        if (spUtil.dmFilterMode) {
-            spUtil.dmFilter?.let { filterStr ->
-                if (filterStr.isNotBlank()) {
-                    val keywords = filterStr.split(DmInitializer.FILTER_SEPARATOR).filter { it.isNotBlank() }
-                    if (keywords.isNotEmpty()) {
-                        danmakuView.addBlackList(false, *keywords.toTypedArray())
-                    }
-                }
-            }
-        }
         videoController.addControlComponent(danmakuView)
         videoController.setTimeSyncListener { onTimeSync() }
         // 长视频控制器
@@ -455,8 +432,12 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         longVideoControlView.setOnLongVideoListener(this)
         longVideoControlView.setOnPlayNextListener(this)
         videoController.addControlComponent(longVideoControlView)
+        // 弹幕默认配置集中在 controller，等长视频控制器就绪后再初始化，避免 lazy 依赖提前访问未初始化字段。
+        longDanmakuController.applyInitialSettings()
         videoView.setVideoController(videoController)
         videoView.startFullScreen()
+        // 轨道面板回调只绑一次，后续轨道数据刷新由 updateTrackPanel 驱动。
+        longTrackPanelController.bind()
         updateTrackEntryByCapabilities()
     }
 
@@ -481,136 +462,12 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private fun initVideoListener() {
         // 弹幕设置
         dmConfView.setOnFontChangeListener(this)
-        dmConfView.setOnValueChangeListener { type, value->
-            when (type) {
-                DmConfControlView.TYPE_SIZE -> danmakuView.updateDanmuSize()
-                DmConfControlView.TYPE_LINE,
-                DmConfControlView.TYPE_TOP_LINE,
-                DmConfControlView.TYPE_BOTTOM_LINE -> danmakuView.updateMaxLine()
-
-                DmConfControlView.TYPE_OPACITY -> danmakuView.updateDanmuAlpha()
-                DmConfControlView.TYPE_STROKE -> danmakuView.updateDanmuStroke()
-                DmConfControlView.TYPE_OFFSET -> danmakuView.updateOffsetTime()
-                DmConfControlView.TYPE_ROLL -> danmakuView.updateMobileDanmuState()
-                DmConfControlView.TYPE_TOP -> danmakuView.updateTopDanmuState()
-                DmConfControlView.TYPE_BOTTOM -> danmakuView.updateBottomDanmuState()
-                DmConfControlView.TYPE_STYLE -> danmakuView.updateTextBold(spUtil.dmBold)
-                DmConfControlView.TYPE_MARGIN -> danmakuView.updateDanmuMargin()
-                DmConfControlView.TYPE_VIEW_MARGIN -> danmakuView.updateDanMuViewMargin()
-                DmConfControlView.TYPE_SCROLL_SPEED -> danmakuView.updateScrollSpeed()
-                DmConfControlView.TYPE_FPS -> danmakuView.showFps(value as Boolean)
-                else -> {}
-            }
-        }
-        danmakuView.updateScrollSpeed()
-        // 弹幕选择
-        dmSelectView.setOnDmSelectListener { dmTrackConf ->
-            dmTrackView.setConf(dmTrackConf)
-            when (dmTrackConf.trackMode) {
-                // 多轨合并
-                DmTrackMode.MULTI_MERGE -> {
-                    dmTrackConf.dmTrack.let { track ->
-                        track.checked = true
-                        dmTrackView.addDmTrack(track)
-                        if (dmTrackView.dataSize() > 1) {
-                            mergeDm(false)
-                        } else {
-                            danmakuView.release()
-                            loadDmTrack(track)
-                        }
-                    }
-                }
-                // 单轨切换
-                else -> {
-                    dmTrackConf.dmTrack.let { selectedTrack ->
-                        dmTrackView.addDmTrack(selectedTrack)
-                        val currentTrack = dmTrackView.selectTrack(selectedTrack) ?: selectedTrack.apply {
-                            selected = true
-                        }
-                        loadDmTrack(currentTrack)
-                    }
-                }
-            }
-            saveCacheInfo(videoView.currentPosition, false, dmTrackConf.dmTrack)
-        }
-        // 弹幕轨道调整
-        dmTrackView.setOnChangeTrackListener { track, _ ->
-            danmakuView.release()
-            loadDmTrack(track)
-            saveCacheInfo(videoView.currentPosition, false, track)
-        }
-        dmTrackView.setOnMergeTrackListener { onSave ->
-            mergeDm(onSave)
-        }
-        dmTrackView.setOnDmOffsetListener { _ ->
-            danmakuView.syncTime()
-        }
-        dmTrackView.setOnRemoveTrackListener {
-            saveCacheInfo(videoView.currentPosition, false)
-        }
-        dmListView.setOnChangeTimeListener { time, position ->
-
-        }
-        mTrackPanelControlView.setOnChangeTrackListener { tabType, name, position ->
-            // TrackPanelControlView still exposes the legacy name/position callback. In the
-            // modularized path, name carries MediaTrackKey.id and blank name means disable track.
-            when (tabType) {
-                TrackPanelControlView.TAB_AUDIO -> {
-                    if (name.isBlank()) {
-                        getMediaTrackController()?.disableTrack(MediaTrackType.AUDIO)
-                    } else {
-                        findTrackKey(MediaTrackType.AUDIO, name)?.let { key ->
-                            Log.d(this, "audio track", name, position)
-                            getMediaTrackController()?.selectTrack(key)
-                        }
-                    }
-                }
-                TrackPanelControlView.TAB_SUBTITLE -> {
-                    if (name.isBlank()) {
-                        getMediaTrackController()?.disableTrack(MediaTrackType.SUBTITLE)
-                        clearSubtitleCueListener()
-                        subtitleControlView.clearText()
-                    } else {
-                        findTrackKey(MediaTrackType.SUBTITLE, name)?.let { key ->
-                            Log.d(this, "subtitle track", name, position)
-                            if (getMediaTrackController()?.selectTrack(key) == true) {
-                                attachSubtitleCueListener()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        mTrackPanelControlView.setOnSubtitleFileSelectedListener { filePath ->
-            val mimeType = TrackPanelControlView.getSubtitleMimeType(filePath)
-            if (mimeType != null) {
-                Log.d(this, "subtitle file selected", filePath, mimeType)
-                addExternalSubtitle(File(filePath).toUri(), mimeType, File(filePath).name)
-            }
-        }
-        mTrackPanelControlView.setOnAudioLanguageChangedListener { language ->
-            applyPreferredLanguages()
-        }
-        mTrackPanelControlView.setOnSubtitleLanguageChangedListener { language ->
-            applyPreferredLanguages()
-        }
-        mTrackPanelControlView.setOnSubtitleFontChangedListener { fontPath ->
-            subtitleControlView.setSubtitleFont(fontPath)
-        }
-        mTrackPanelControlView.setOnSubtitleFontSizeChangedListener { size ->
-            subtitleControlView.setSubtitleAbsoluteTextSize(size.toFloat())
-        }
-        // 主动应用持久化的字幕设置
-        spUtil.subtitleFont?.let { fontPath ->
-            if (fontPath.isNotBlank()) {
-                subtitleControlView.setSubtitleFont(fontPath)
-            }
-        }
-        subtitleControlView.setSubtitleAbsoluteTextSize(spUtil.subtitleFontSize.toFloat())
+        // 弹幕相关 UI 回调已下沉到 controller，Activity 只保留播放状态编排。
+        longDanmakuController.bind()
         speedControlView.setOnChangeSpeedListener { speed, position ->
             Log.d(this@LongVideoActivity, "onSpeedChange", PlayerInitializer.Player.videoSpeed)
             videoView.speed = PlayerInitializer.Player.videoSpeed
-            danmakuView.updateDanmuSpeed()
+            longDanmakuController.updateSpeed()
         }
         // 视频播放状态监听
         videoView.addOnStateChangeListener(object : OnStateChangeListener {
@@ -694,7 +551,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                     // ======================================
 
                     // 非后台恢复错误，或已重试过一次，执行正常错误处理
-                    saveCacheInfo(binding.videoView.currentPosition, true)
+                    longDanmakuController.saveCacheInfo(binding.videoView.currentPosition, true)
                     if (spUtil.autoNext) {
                         longVideoControlView.showTips("播放错误，自动播放下一集")
                         onNextPlay()
@@ -704,7 +561,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                 }
                 if (playState == VideoView.STATE_PLAYBACK_COMPLETED) {
                     cancelBlackScreenWatchdog()
-                    saveCacheInfo(0, true)
+                    longDanmakuController.saveCacheInfo(0, true)
                     if (spUtil.autoNext) {
                         onNextPlay()
                     }
@@ -726,187 +583,6 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                 }
             }
         })
-    }
-
-    private fun loadDmTrack(track: DmTrack) {
-        danmakuView.release()
-        if (track.mineType == ZipXmlLoader.ZIP) {
-            loadZipDmTrack(track)
-        } else {
-            danmakuView.loadDanMu(track.path)
-            setDmList(track.path)
-        }
-    }
-
-    private fun loadZipDmTrack(track: DmTrack) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val fileEntity = FileEntity(
-                name = track.title,
-                title = track.title,
-                path = track.path,
-                mimeType = track.mineType
-            )
-            val result = ZipXmlLoader.loadXmlFromZipResult(fileEntity, track.password)
-            when (result.state) {
-                ZipXmlLoader.OpenResultState.SUCCESS -> {
-                    val byteArray = result.stream?.use { it.readBytes() }
-                    val dmList = byteArray?.let {
-                        XmlConverter.fromXmlInput(ByteArrayInputStream(it)).list
-                    }.orEmpty()
-                    withContext(Dispatchers.Main) {
-                        if (byteArray == null) {
-                            clearDmPanels()
-                            longVideoControlView.showTips("弹幕读取失败")
-                            return@withContext
-                        }
-                        danmakuView.loadDanMu(ByteArrayInputStream(byteArray))
-                        applyDmList(dmList)
-                    }
-                }
-
-                ZipXmlLoader.OpenResultState.WRONG_PASSWORD -> {
-                    withContext(Dispatchers.Main) {
-                        clearDmPanels()
-                        longVideoControlView.showTips("弹幕密码错误，请重新选择")
-                    }
-                }
-
-                ZipXmlLoader.OpenResultState.UNSUPPORTED_METHOD -> {
-                    withContext(Dispatchers.Main) {
-                        clearDmPanels()
-                        longVideoControlView.showTips("压缩包方法不支持")
-                    }
-                }
-
-                ZipXmlLoader.OpenResultState.ENTRY_NOT_FOUND -> {
-                    withContext(Dispatchers.Main) {
-                        clearDmPanels()
-                        longVideoControlView.showTips("压缩包条目不存在")
-                    }
-                }
-
-                ZipXmlLoader.OpenResultState.ERROR -> {
-                    withContext(Dispatchers.Main) {
-                        clearDmPanels()
-                        longVideoControlView.showTips("弹幕读取失败")
-                    }
-                }
-            }
-        }
-    }
-
-    private fun setDmList(path: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val dmList = XmlConverter.fromXmlFile(path).list
-            withContext(Dispatchers.Main) {
-                applyDmList(dmList)
-            }
-        }
-    }
-
-    private fun clearDmPanels() {
-        dmListView.cleanDmList()
-        longVideoControlView.updateCurveData(floatArrayOf())
-    }
-
-    private fun applyDmList(items: List<DmItem>) {
-        val list = items.sortedBy { it.time }
-        if (list.isEmpty()) {
-            clearDmPanels()
-            return
-        }
-        dmListView.setDmList(list)
-        val countList = list.map { item -> (item.time * 1000).toLong() }
-        val curveData = if (countList.isEmpty()) {
-            floatArrayOf()
-        } else {
-            DensityCalculator.calculateDensity(countList, videoView.duration)
-        }
-        longVideoControlView.updateCurveData(curveData)
-    }
-
-    private fun setDmFont() {
-        if (spUtil.dmFontMode) {
-            spUtil.dmCurrentFont?.let {
-                if (it.isNotBlank()) {
-                    val file = File(it)
-                    if (file.exists()) {
-                        danmakuView.setTypeface(Typeface.createFromFile(file))
-                        dmConfView.setCustomFont(it)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun mergeDm(onSave: Boolean) {
-        if (itemViewModel.isMerge()) {
-            longVideoControlView.showTips("正在合并，清稍等")
-            return
-        }
-        val dmTrackList = dmTrackView.listSelectedTrack()
-        if (dmTrackList.isNotEmpty()) {
-            itemViewModel.setMergeState(true)
-            lifecycleScope.launch(Dispatchers.IO) {
-                if (onSave) {
-                    val file = AppFile(this@LongVideoActivity).buildCustom(
-                        "xml",
-                        "${itemViewModel.getItem(mCurPos).name}.xml"
-                    )
-                    val success = AtomicInteger(dmTrackList.size)
-                    XmlMerger.mergeXmlParts(dmTrackList, file) { name, message ->
-                        if (message.isNotBlank()) {
-                            success.getAndDecrement()
-                            runOnUiThread {
-                                longVideoControlView.showSubTips("$name $message")
-                            }
-                        }
-                    }
-                    withContext(Dispatchers.Main) {
-                        longVideoControlView.showTips("${success.get()}个文件合并成功")
-                    }
-                } else {
-                    ByteArrayOutputStream().use { outputStream ->
-                        XmlMerger.mergeXmlParts(dmTrackList, outputStream) { name, message ->
-                            if (message.isNotBlank()) {
-                                runOnUiThread {
-                                    longVideoControlView.showSubTips("$name $message")
-                                }
-                            }
-                        }
-                        val byteArray = outputStream.toByteArray()
-                        ByteArrayInputStream(byteArray).use { inputStream ->
-                            withContext(Dispatchers.Main) {
-                                try {
-                                    danmakuView.release()
-                                    danmakuView.loadDanMu(inputStream)
-                                    longVideoControlView.showTips("合并装载成功")
-                                } catch (e: Exception) {
-                                    FileOperator.writeText(
-                                        lifecycleScope,
-                                        AppFile(this@LongVideoActivity).buildCustom(
-                                            "logs",
-                                            "dm_track_merge_${System.currentTimeMillis()}.log"
-                                        ),
-                                        e.stackTraceToString()
-                                    )
-                                }
-                            }
-                        }
-                        ByteArrayInputStream(byteArray).use { inputStream ->
-                            val dmList = XmlConverter.fromXmlInput(inputStream).list
-                            withContext(Dispatchers.Main) {
-                                applyDmList(dmList)
-                            }
-                        }
-                    }
-                }
-                withContext(Dispatchers.Main) {
-                    itemViewModel.setMergeState(false)
-                }
-            }
-        }
-
     }
 
     override fun onPreviousPlay() {
@@ -934,21 +610,21 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
 
     override fun onTimeSync() {
-        danmakuView.syncTime()
+        longDanmakuController.syncTime()
     }
 
     private fun startPlay(position: Int) {
-        mediaLastPlayedUpdateJob?.cancel()
-        clearDmPanels()
+        mediaPlaybackRecorder.cancelLastPlayedUpdate()
+        // 切换播放项前先清掉上一集弹幕列表/曲线，避免旧数据短暂残留。
+        longDanmakuController.clearPanels()
         val videoBean = itemViewModel.getItem(position)
         Log.d(this, "startPlay", position, videoBean.name)
         logAndCache("LongVideoActivity", "D", "startPlay position=$position name=${videoBean.name} url=${videoBean.videoUrl}")
         lifecycleScope.launch(Dispatchers.IO) {
             videoBean.playUrl().let { playUrl ->
                 lifecycleScope.launch(Dispatchers.Main) {
-                    danmakuView.release()
-                    dmTrackView.cleanData()
-                    dmSelectView.resetView()
+                    // 新视频起播前统一重置 controller 持有的弹幕 UI 状态。
+                    longDanmakuController.resetForNewPlayback()
                     subtitleControlView.clearText()
                     videoScaleControlView.resetValue()
                     PlayerInitializer.resetSpeed()
@@ -999,216 +675,29 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
 
     private fun startBlackScreenWatchdog(position: Int, title: String, playUrl: String) {
-        cancelBlackScreenWatchdog()
         if (!spUtil.debugMode) {
             return
         }
-        val token = System.currentTimeMillis()
-        blackScreenWatchToken = token
-        logAndCache("BlackScreenWatchdog", "D", "start token=$token position=$position title=$title")
-        blackScreenWatchJob = lifecycleScope.launch {
-            delay(BLACK_SCREEN_CHECK_DELAY_MS)
-            if (blackScreenWatchToken != token || position != mCurPos) {
-                return@launch
-            }
-            if (videoView.currentPlayState == VideoView.STATE_ERROR ||
-                videoView.currentPlayState == VideoView.STATE_PLAYBACK_COMPLETED
-            ) {
-                return@launch
-            }
-            checkSurfaceFrameAndSaveIfBlack(token, position, title, playUrl)
-        }
+        // 诊断逻辑已抽出；Activity 只控制是否在调试模式启动检测。
+        blackScreenWatchdog.start(position, title, playUrl)
     }
 
     private fun cancelBlackScreenWatchdog() {
-        blackScreenWatchJob?.cancel()
-        blackScreenWatchJob = null
-    }
-
-    private fun checkSurfaceFrameAndSaveIfBlack(token: Long, position: Int, title: String, playUrl: String) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            longVideoControlView.showSubTips("画面检测失败")
-            saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: 画面检测失败, PixelCopy requires API 26")
-            return
-        }
-        val renderView = videoView.getRenderTransformView()
-        if (renderView !is SurfaceView) {
-            logAndCache("BlackScreenWatchdog", "D", "skip non-SurfaceView render=${renderView?.javaClass?.name}")
-            longVideoControlView.showSubTips("非SurfaceView")
-            return
-        }
-        val width = renderView.width
-        val height = renderView.height
-        if (width <= 0 || height <= 0) {
-            longVideoControlView.showSubTips("画面检测失败")
-            saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: 画面检测失败, invalid size ${width}x$height")
-            return
-        }
-        val bitmap = createBitmap(width, height)
-        try {
-            PixelCopy.request(renderView, bitmap, { result ->
-                if (blackScreenWatchToken != token || position != mCurPos) {
-                    return@request
-                }
-                if (result != PixelCopy.SUCCESS) {
-                    longVideoControlView.showSubTips("画面检测失败")
-                    saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: 画面检测失败, PixelCopy result=$result size=${width}x$height")
-                    return@request
-                }
-                val isMostlyBlack = isMostlyBlack(bitmap)
-                if (isMostlyBlack) {
-                    longVideoControlView.showSubTips("无画面")
-                }
-                logAndCache("BlackScreenWatchdog", "D", "surface frame diagnostic token=$token result=$isMostlyBlack size=${width}x$height")
-                saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: $isMostlyBlack, PixelCopy success size=${width}x$height")
-            }, Handler(Looper.getMainLooper()))
-        } catch (e: Exception) {
-            longVideoControlView.showSubTips("画面检测失败")
-            saveBlackScreenLog(token, position, title, playUrl, "SurfaceView startup diagnostic: 画面检测失败, PixelCopy exception: ${e.message}")
-        }
-    }
-
-    private fun isMostlyBlack(bitmap: Bitmap): Boolean {
-        val stepX = maxOf(1, bitmap.width / 32)
-        val stepY = maxOf(1, bitmap.height / 32)
-        var total = 0
-        var black = 0
-        var y = 0
-        while (y < bitmap.height) {
-            var x = 0
-            while (x < bitmap.width) {
-                val pixel = bitmap.getPixel(x, y)
-                val luminance = (Color.red(pixel) * 299 + Color.green(pixel) * 587 + Color.blue(pixel) * 114) / 1000
-                if (luminance <= 16) {
-                    black++
-                }
-                total++
-                x += stepX
-            }
-            y += stepY
-        }
-        return total > 0 && black * 100 / total >= 95
-    }
-
-    private fun saveBlackScreenLog(token: Long, position: Int, title: String, playUrl: String, reason: String) {
-        logAndCache("BlackScreenWatchdog", "E", "save black screen log token=$token reason=$reason")
-        val entries = playbackLogCache.getEntries()
-        val playPosition = videoView.currentPosition
-        val playState = videoView.currentPlayState
-        val playerState = videoView.currentPlayerState
-        val hasPlayer = videoView.hasPlayer()
-        val renderView = videoView.getRenderTransformView()
-        val hasRenderView = renderView != null
-        val renderViewType = renderView?.javaClass?.name
-        lifecycleScope.launch(Dispatchers.IO) {
-            val content = buildString {
-                appendLine("=== 长视频 SurfaceView 起播诊断日志 ===")
-                appendLine("时间: ${System.currentTimeMillis()}")
-                appendLine("原因: $reason")
-                appendLine("视频位置: $position")
-                appendLine("当前视频位置: $mCurPos")
-                appendLine("视频名称: $title")
-                appendLine("播放位置: $playPosition")
-                appendLine("播放状态: $playState")
-                appendLine("播放器状态: $playerState")
-                appendLine("是否有MediaPlayer: $hasPlayer")
-                appendLine("是否有RenderView: $hasRenderView")
-                appendLine("RenderView类型: $renderViewType")
-                appendLine("URL: $playUrl")
-                appendLine()
-                appendLine("--- 开播后最近 ${entries.size} 条日志 ---")
-                entries.forEach { entry ->
-                    appendLine("[${entry.timestamp}] [${entry.level}] [${entry.tag}] ${entry.message}")
-                }
-                appendLine("======================")
-            }
-            FileOperator.writeText(
-                lifecycleScope,
-                AppFile(this@LongVideoActivity).buildCustom(
-                    "logs",
-                    "surface_startup_diag_${System.currentTimeMillis()}.log"
-                ),
-                content
-            )
-        }
+        blackScreenWatchdog.cancel()
     }
 
     private fun saveMediaInfo(url: String) {
-        itemViewModel.getMediaData()?.let { media ->
-            media.playLast = url
-            val sourceList = LibraryCompat.loadSources(spUtil)
-            LibraryCompat.loadMedia(spUtil).let { dataSet ->
-                val index = dataSet.indexOfFirst { LibraryCompat.sameMedia(it, media, sourceList) }
-                if (index > -1) {
-                    dataSet[index] = media
-                    logD("lastPlay", media)
-                    LibraryCompat.saveMedia(spUtil, dataSet)
-                }
-            }
-        }
+        mediaPlaybackRecorder.saveLastPlayedUrl(itemViewModel.getMediaData(), url)
     }
 
     private fun scheduleMediaLastPlayedUpdate(position: Int) {
-        if (mediaLastPlayedUpdated) return
-        val mediaId = itemViewModel.getMediaData()?.id?.takeIf { it.isNotBlank() } ?: return
-        mediaLastPlayedUpdateJob?.cancel()
-        mediaLastPlayedUpdateJob = lifecycleScope.launch {
-            delay(MEDIA_LAST_PLAYED_UPDATE_DELAY_MS)
-            if (mediaLastPlayedUpdated || position != mCurPos) return@launch
-            if (videoView.currentPlayState != VideoView.STATE_PLAYING) return@launch
-            withContext(Dispatchers.IO) {
-                updateMediaLastPlayedAt(mediaId)
-            }
-            mediaLastPlayedUpdated = true
-        }
-    }
-
-    private fun updateMediaLastPlayedAt(mediaId: String) {
-        val list = LibraryCompat.loadMedia(spUtil)
-        list.find { it.id == mediaId }?.let { media ->
-            media.lastPlayedAt = System.currentTimeMillis()
-            LibraryCompat.saveMedia(spUtil, list)
-        }
-    }
-
-    private fun addDmFile(file: File) {
-        if (file.exists()) {
-            dmTrackView.addDmTrack(
-                DmTrack(
-                    title = file.name,
-                    path = file.path
-                )
-            )
-            danmakuView.release()
-            danmakuView.loadDanMu(file.path)
-            setDmList(file.path)
-        }
-    }
-
-    private fun restoreSavedDmTrack(info: PlayInfo): Boolean {
-        info.lastDmTrack?.let { lastTrack ->
-            dmTrackView.findTrack(lastTrack)?.let { track ->
-                dmTrackView.selectTrack(track)
-                loadDmTrack(track)
-                return true
-            }
-        }
-        dmTrackView.listSelectedTrack().let { selectedTracks ->
-            if (selectedTracks.size > 1) {
-                itemViewModel.setMergeState(false)
-                mergeDm(false)
-                return true
-            }
-            if (selectedTracks.size == 1) {
-                loadDmTrack(selectedTracks.first())
-                return true
-            }
-        }
-        dmTrackView.allTrack().firstOrNull()?.let { track ->
-            loadDmTrack(track)
-            return true
-        }
-        return false
+        mediaPlaybackRecorder.scheduleLastPlayedAtUpdate(
+            scope = lifecycleScope,
+            mediaData = itemViewModel.getMediaData(),
+            position = position,
+            currentPosition = { mCurPos },
+            currentPlayState = { videoView.currentPlayState }
+        )
     }
 
     private fun onPlayStart() {
@@ -1238,22 +727,18 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                     longVideoControlView.showTips("跳转上传播放的位置 ${PlayerUtils.stringForTime(info.playSeek.toInt())}")
                 }
                 info.dmTrack.let { list ->
-                    for (track in list) {
-                        //track.selected = true
-                        //track.checked = true
-                        if (File(track.path).exists()) {
-                            dmTrackView.addDmTrack(track)
-                        }
-                    }
-                    if (dmTrackView.allTrack().isNotEmpty()) {
+                    // 弹幕轨道恢复细节由 controller 处理，Activity 只决定何时触发恢复。
+                    longDanmakuController.addTracks(list)
+                    if (longDanmakuController.hasTracks()) {
                         unLoadDm = false
-                        restoreSavedDmTrack(info)
+                        longDanmakuController.restoreSavedTrack(info)
                     }
                 }
             }
             if (unLoadDm) {
+                // 没有历史轨道时，按当前存储类型兜底装载默认弹幕文件。
                 if (videoData.type == StorageType.LOCAL_STORAGE) {
-                    addDmFile(File(videoData.dmLink))
+                    longDanmakuController.addDmFile(File(videoData.dmLink))
                 }
                 if (videoData.type == StorageType.WEBDAV) {
                     PlayHelper.loadDavDm(
@@ -1261,7 +746,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                         lifecycleScope,
                         videoData
                     ) { file ->
-                        addDmFile(file)
+                        longDanmakuController.addDmFile(file)
                     }
                 }
             }
@@ -1317,113 +802,42 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         if (!::mTrackPanelControlView.isInitialized) {
             return
         }
-        mediaTrackSnapshot = snapshot
-        // 这里只负责“轨道面板展示 + 字幕渲染器开关”，不再做默认选轨，避免和底层策略冲突。
-        val audioTracks = snapshot.audioTracks
-            .filter { it.isSupported }
-            .mapIndexed { index, track -> track.toTitleItem(index, MediaTrackType.AUDIO) }
-        val subtitleTracks = snapshot.subtitleTracks
-            .filter { it.isSupported }
-            .mapIndexed { index, track -> track.toTitleItem(index, MediaTrackType.SUBTITLE) }
-        mTrackPanelControlView.setAudioTracks(audioTracks)
-        mTrackPanelControlView.setSubtitleTracks(subtitleTracks)
-        updateTrackEntryByCapabilities()
-        if (snapshot.audioTracks.isEmpty() && snapshot.subtitleTracks.isEmpty()) {
-            clearSubtitleCueListener()
-            subtitleControlView.clearText()
-            return
-        }
-        val selectedSubtitle = snapshot.subtitleTracks.firstOrNull { it.isSelected }
-        if (selectedSubtitle != null && getSubtitleCueProvider() != null) {
-            // Exo provides generic cues for self-rendered subtitles. MPV normally returns null here
-            // and continues rendering subtitles internally.
-            attachSubtitleCueListener()
-        } else {
-            clearSubtitleCueListener()
-            subtitleControlView.clearText()
-        }
+        // 轨道列表映射和字幕 cue 开关由 controller 统一维护。
+        longTrackPanelController.updateTracks(snapshot)
     }
 
     private fun updateTrackEntryByCapabilities() {
         if (!::longVideoControlView.isInitialized) {
             return
         }
-        // Entry visibility is capability-driven rather than core-name-driven so future backends can
-        // expose track support without adding more Exo/MPV checks in the UI.
-        if (getPlayerCapabilities().canListTracks) {
-            longVideoControlView.useTrack()
-        } else {
-            longVideoControlView.unTrack()
-        }
-    }
-
-    private fun findTrackKey(type: MediaTrackType, id: String): MediaTrackKey? {
-        // TrackPanelControlView still uses TitleItem.name as a UI id, so map it back to the common key.
-        val tracks = when (type) {
-            MediaTrackType.AUDIO -> mediaTrackSnapshot.audioTracks
-            MediaTrackType.SUBTITLE -> mediaTrackSnapshot.subtitleTracks
-            MediaTrackType.VIDEO -> mediaTrackSnapshot.videoTracks
-            MediaTrackType.UNKNOWN -> emptyList()
-        }
-        return tracks.firstOrNull { it.key.id == id }?.key
-    }
-
-    private fun MediaTrack.toTitleItem(index: Int, type: MediaTrackType): TitleItem {
-        return TitleItem(
-            title = buildTrackTitle(this, index, type),
-            name = key.id,
-            selected = isSelected
-        )
-    }
-
-    private fun buildTrackTitle(track: MediaTrack, index: Int, type: MediaTrackType): String {
-        val fallback = when (type) {
-            MediaTrackType.AUDIO -> "Audio Track ${index + 1}"
-            MediaTrackType.SUBTITLE -> "Subtitle Track ${index + 1}"
-            MediaTrackType.VIDEO -> "Video Track ${index + 1}"
-            MediaTrackType.UNKNOWN -> "Track ${index + 1}"
-        }
-        val baseTitle = track.title?.takeIf { it.isNotBlank() } ?: fallback
-        val suffix = listOfNotNull(
-            track.language?.takeIf { it.isNotBlank() },
-            track.codec?.takeIf { it.isNotBlank() }
-        ).joinToString(" ")
-        return if (suffix.isBlank()) baseTitle else "$baseTitle $suffix"
+        longTrackPanelController.updateEntryByCapabilities()
     }
 
     private fun applyPreferredLanguages() {
-        val audioLanguages = spUtil.preferredAudioLanguage.toLanguageList()
-        val subtitleLanguages = spUtil.preferredSubtitleLanguage.toLanguageList()
-        getMediaTrackController()?.setPreferredLanguages(audioLanguages, subtitleLanguages)
-    }
-
-    private fun String?.toLanguageList(): List<String> {
-        return this?.takeIf { it.isNotBlank() }?.let { listOf(it) } ?: emptyList()
+        if (!::mTrackPanelControlView.isInitialized) {
+            return
+        }
+        longTrackPanelController.applyPreferredLanguages()
     }
 
     private fun addExternalSubtitle(uri: Uri, mimeType: String?, title: String?): Boolean {
-        // The backend decides whether this becomes an Exo merged source or an MPV sub-add command.
-        val success = getExternalTrackController()?.addExternalTrack(
-            ExternalTrackRequest(
-                type = MediaTrackType.SUBTITLE,
-                uri = uri,
-                mimeType = mimeType,
-                title = title,
-                selectAfterAdd = true
-            )
-        ) == true
-        if (success) {
-            attachSubtitleCueListener()
-        }
-        return success
+        return ExternalSubtitleLoader.addSubtitle(
+            externalTrackController = getExternalTrackController(),
+            subtitleCueProvider = getSubtitleCueProvider(),
+            subtitleControlView = subtitleControlView,
+            uri = uri,
+            mimeType = mimeType,
+            title = title
+        )
     }
 
     private fun attachSubtitleCueListener() {
-        getSubtitleCueProvider()?.setSubtitleCueListener(subtitleControlView::onSubtitleCues)
+        // 具体 cue 绑定逻辑抽到共享 helper，避免长短视频页各自维护一套。
+        ExternalSubtitleLoader.attachCueListener(getSubtitleCueProvider(), subtitleControlView)
     }
 
     private fun clearSubtitleCueListener() {
-        getSubtitleCueProvider()?.setSubtitleCueListener(null)
+        ExternalSubtitleLoader.clearCueListener(getSubtitleCueProvider())
     }
 
     override fun onResume() {
@@ -1468,7 +882,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     override fun onDestroy() {
         super.onDestroy()
         cancelBlackScreenWatchdog()
-        mediaLastPlayedUpdateJob?.cancel()
+        mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
         PlayerInitializer.resetSpeed()
@@ -1514,13 +928,12 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onShowDmTrack() {
         videoController.hide()
-        dmTrackView.switchVib()
+        longDanmakuController.switchTrackPanel()
     }
 
     override fun onShowDmList() {
         videoController.hide()
-        dmListView.switchVib()
-        dmListView.scrollToPosition(videoView.currentPosition)
+        longDanmakuController.switchListPanel(videoView.currentPosition)
     }
 
     override fun onShowTrackPanel() {
@@ -1531,27 +944,17 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     override fun onVideoProgress(duration: Int, position: Int) {
         rememberPlaybackPosition(position.toLong())
         if (position > 3000) {
-            saveCacheInfo(position.toLong())
+            longDanmakuController.saveCacheInfo(position.toLong())
         }
         if (itemViewModel.hasMediaData()) {
             itemViewModel.getMediaData()?.let {
                 // 跳过片尾
                 if (it.edOffset > 0 && (duration - position) / 1000 == it.edOffset) {
                     logD("duration", duration, "position", position, "ed", it.edOffset)
-                    saveCacheInfo(0)
+                    longDanmakuController.saveCacheInfo(0)
                     longVideoControlView.showTips("跳过片尾")
                     onNextPlay()
                 }
-            }
-        }
-    }
-
-    private fun loadDmFile(fileName: String) {
-        val file = File(fileName)
-        if (file.exists()) {
-            danmakuView.release()
-            lifecycleScope.launch(Dispatchers.IO) {
-                danmakuView.loadDanMu(fileName)
             }
         }
     }
@@ -1602,38 +1005,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
 
     override fun onFontChange(fontPath: String) {
-        if (fontPath.isNotBlank()) {
-            lifecycleScope.launch(Dispatchers.IO) {
-                danmakuView.setTypeface(Typeface.createFromFile(fontPath))
-            }
-        } else {
-            danmakuView.clearTypeface()
-        }
-    }
-
-    private fun saveCacheInfo(process: Long, update: Boolean = true, track: DmTrack? = null) {
-        if (itemViewModel.getItemSize() <= 0) {
-            return
-        }
-        if (update) {
-            PlayHelper.updateInfo(
-                this,
-                lifecycleScope,
-                itemViewModel.getItem(mCurPos),
-                process,
-                dmTrackView.allTrack(),
-                track ?: dmTrackView.allTrack().lastOrNull()
-            )
-        } else {
-            PlayHelper.saveInfo(
-                this,
-                lifecycleScope,
-                itemViewModel.getItem(mCurPos),
-                process,
-                dmTrackView.allTrack(),
-                track ?: dmTrackView.allTrack().lastOrNull()
-            )
-        }
+        longDanmakuController.onFontChange(fontPath)
     }
 
 }

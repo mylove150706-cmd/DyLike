@@ -1,0 +1,466 @@
+package me.lingci.dy.player.ui.long_video
+
+import android.content.Context
+import android.graphics.Typeface
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import me.lingci.dy.player.entity.VideoData
+import me.lingci.dy.player.util.SpUtil
+import me.lingci.dy.player.view.LongVideoControlView
+import me.lingci.lib.base.storage.entity.FileEntity
+import me.lingci.lib.base.util.AppFile
+import me.lingci.lib.base.util.DensityCalculator
+import me.lingci.lib.base.util.FileOperator
+import me.lingci.lib.dm.view.common.DmInitializer
+import me.lingci.lib.dm.view.entity.DmTrack
+import me.lingci.lib.dm.view.entity.DmTrackMode
+import me.lingci.lib.dm.view.entity.xml.DmItem
+import me.lingci.lib.dm.view.util.XmlConverter
+import me.lingci.lib.dm.view.util.XmlMerger
+import me.lingci.lib.dm.view.util.ZipXmlLoader
+import me.lingci.lib.player.danmaku.PlayerInitializer
+import me.lingci.lib.player.widget.component.DanmakuControlView
+import me.lingci.lib.player.widget.component.DmConfControlView
+import me.lingci.lib.player.widget.component.DmListControlView
+import me.lingci.lib.player.widget.component.DmSelectControlView
+import me.lingci.lib.player.widget.component.DmTrackControlView
+import me.lingci.lib.player.widget.videoview.CustomVideoView
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * 长视频弹幕控制器。
+ *
+ * 负责弹幕视图初始化、轨道选择/恢复、XML/ZIP 加载、弹幕合并、列表曲线刷新和播放信息缓存。
+ * Activity 只保留播放页编排和当前视频数据来源，避免弹幕文件格式与 UI 回调继续堆在页面类里。
+ */
+class LongDanmakuController(
+    private val context: Context,
+    private val scope: CoroutineScope,
+    private val spUtil: SpUtil,
+    private val danmakuView: DanmakuControlView,
+    private val dmSelectView: DmSelectControlView,
+    private val dmConfView: DmConfControlView,
+    private val dmTrackView: DmTrackControlView,
+    private val dmListView: DmListControlView,
+    private val longVideoControlView: LongVideoControlView,
+    private val videoView: CustomVideoView,
+    private val currentVideoData: () -> VideoData?,
+    private val currentVideoName: () -> String,
+    private val isMerge: () -> Boolean,
+    private val setMergeState: (Boolean) -> Unit
+) {
+
+    /** 应用进入播放页时的全局弹幕样式、性能和过滤配置。 */
+    fun applyInitialSettings() {
+        setDmFont()
+        danmakuView.toggleVis(spUtil.showDm)
+        danmakuView.showFps(spUtil.showDmFps)
+        danmakuView.setStrokeMultiple(spUtil.dmStrokeMultiple)
+        danmakuView.updateTextBold(spUtil.dmBold)
+        danmakuView.setDmGradient(spUtil.dmGradientMode, spUtil.dmGradientRatio)
+        danmakuView.setGradientWithTextColor(spUtil.dmGradientWithTextColor)
+        danmakuView.setMergeOption(
+            spUtil.dmShowTime,
+            spUtil.dmMergeMode,
+            spUtil.dmMergeShow,
+            spUtil.dmMergeTop,
+            spUtil.debugMode
+        )
+        if (spUtil.dmFilterMode) {
+            spUtil.dmFilter?.let { filterStr ->
+                if (filterStr.isNotBlank()) {
+                    val keywords = filterStr.split(DmInitializer.FILTER_SEPARATOR).filter { it.isNotBlank() }
+                    if (keywords.isNotEmpty()) {
+                        danmakuView.addBlackList(false, *keywords.toTypedArray())
+                    }
+                }
+            }
+        }
+    }
+
+    /** 绑定弹幕设置、选择、轨道、合并和列表面板回调。 */
+    fun bind() {
+        dmConfView.setOnValueChangeListener { type, value ->
+            when (type) {
+                DmConfControlView.TYPE_SIZE -> danmakuView.updateDanmuSize()
+                DmConfControlView.TYPE_LINE,
+                DmConfControlView.TYPE_TOP_LINE,
+                DmConfControlView.TYPE_BOTTOM_LINE -> danmakuView.updateMaxLine()
+
+                DmConfControlView.TYPE_OPACITY -> danmakuView.updateDanmuAlpha()
+                DmConfControlView.TYPE_STROKE -> danmakuView.updateDanmuStroke()
+                DmConfControlView.TYPE_OFFSET -> danmakuView.updateOffsetTime()
+                DmConfControlView.TYPE_ROLL -> danmakuView.updateMobileDanmuState()
+                DmConfControlView.TYPE_TOP -> danmakuView.updateTopDanmuState()
+                DmConfControlView.TYPE_BOTTOM -> danmakuView.updateBottomDanmuState()
+                DmConfControlView.TYPE_STYLE -> danmakuView.updateTextBold(spUtil.dmBold)
+                DmConfControlView.TYPE_MARGIN -> danmakuView.updateDanmuMargin()
+                DmConfControlView.TYPE_VIEW_MARGIN -> danmakuView.updateDanMuViewMargin()
+                DmConfControlView.TYPE_SCROLL_SPEED -> danmakuView.updateScrollSpeed()
+                DmConfControlView.TYPE_FPS -> danmakuView.showFps(value as Boolean)
+                else -> {}
+            }
+        }
+        danmakuView.updateScrollSpeed()
+        dmSelectView.setOnDmSelectListener { dmTrackConf ->
+            dmTrackView.setConf(dmTrackConf)
+            when (dmTrackConf.trackMode) {
+                DmTrackMode.MULTI_MERGE -> {
+                    dmTrackConf.dmTrack.let { track ->
+                        track.checked = true
+                        dmTrackView.addDmTrack(track)
+                        if (dmTrackView.dataSize() > 1) {
+                            merge(false)
+                        } else {
+                            danmakuView.release()
+                            loadTrack(track)
+                        }
+                    }
+                }
+
+                else -> {
+                    dmTrackConf.dmTrack.let { selectedTrack ->
+                        dmTrackView.addDmTrack(selectedTrack)
+                        val currentTrack = dmTrackView.selectTrack(selectedTrack) ?: selectedTrack.apply {
+                            selected = true
+                        }
+                        loadTrack(currentTrack)
+                    }
+                }
+            }
+            saveCacheInfo(videoView.currentPosition, false, dmTrackConf.dmTrack)
+        }
+        dmTrackView.setOnChangeTrackListener { track, _ ->
+            danmakuView.release()
+            loadTrack(track)
+            saveCacheInfo(videoView.currentPosition, false, track)
+        }
+        dmTrackView.setOnMergeTrackListener { onSave ->
+            merge(onSave)
+        }
+        dmTrackView.setOnDmOffsetListener { _ ->
+            danmakuView.syncTime()
+        }
+        dmTrackView.setOnRemoveTrackListener {
+            saveCacheInfo(videoView.currentPosition, false)
+        }
+        dmListView.setOnChangeTimeListener { _, _ -> }
+    }
+
+    /** 清空弹幕列表面板和进度条密度曲线。 */
+    fun clearPanels() {
+        dmListView.cleanDmList()
+        longVideoControlView.updateCurveData(floatArrayOf())
+    }
+
+    /** 新视频开始播放前重置弹幕视图、轨道数据和选择面板状态。 */
+    fun resetForNewPlayback() {
+        release()
+        dmTrackView.cleanData()
+        dmSelectView.resetView()
+    }
+
+    /** 释放弹幕渲染资源。 */
+    fun release() {
+        danmakuView.release()
+    }
+
+    /** 将弹幕时间同步到播放器当前进度。 */
+    fun syncTime() {
+        danmakuView.syncTime()
+    }
+
+    /** 播放倍速变化后同步弹幕滚动速度。 */
+    fun updateSpeed() {
+        danmakuView.updateDanmuSpeed()
+    }
+
+    /** 切换弹幕轨道面板显示状态。 */
+    fun switchTrackPanel() {
+        dmTrackView.switchVib()
+    }
+
+    /** 切换弹幕列表面板，并滚动到当前播放进度附近。 */
+    fun switchListPanel(currentPosition: Long) {
+        dmListView.switchVib()
+        dmListView.scrollToPosition(currentPosition)
+    }
+
+    /** 应用用户选择的弹幕字体；空路径表示恢复默认字体。 */
+    fun onFontChange(fontPath: String) {
+        if (fontPath.isNotBlank()) {
+            scope.launch(Dispatchers.IO) {
+                danmakuView.setTypeface(Typeface.createFromFile(fontPath))
+            }
+        } else {
+            danmakuView.clearTypeface()
+        }
+    }
+
+    /** 添加一个本地 XML 弹幕文件并立即加载。 */
+    fun addDmFile(file: File) {
+        if (file.exists()) {
+            dmTrackView.addDmTrack(
+                DmTrack(
+                    title = file.name,
+                    path = file.path
+                )
+            )
+            danmakuView.release()
+            danmakuView.loadDanMu(file.path)
+            setDmList(file.path)
+        }
+    }
+
+    /** 按保存的播放信息恢复上次选中的弹幕轨道，必要时回退到已选/首个轨道。 */
+    fun restoreSavedTrack(info: PlayInfo): Boolean {
+        info.lastDmTrack?.let { lastTrack ->
+            dmTrackView.findTrack(lastTrack)?.let { track ->
+                dmTrackView.selectTrack(track)
+                loadTrack(track)
+                return true
+            }
+        }
+        dmTrackView.listSelectedTrack().let { selectedTracks ->
+            if (selectedTracks.size > 1) {
+                setMergeState(false)
+                merge(false)
+                return true
+            }
+            if (selectedTracks.size == 1) {
+                loadTrack(selectedTracks.first())
+                return true
+            }
+        }
+        dmTrackView.allTrack().firstOrNull()?.let { track ->
+            loadTrack(track)
+            return true
+        }
+        return false
+    }
+
+    /** 恢复历史播放信息里的弹幕轨道列表，只接收当前仍存在的文件。 */
+    fun addTracks(tracks: List<DmTrack>) {
+        for (track in tracks) {
+            if (File(track.path).exists()) {
+                dmTrackView.addDmTrack(track)
+            }
+        }
+    }
+
+    /** 当前是否存在可加载的弹幕轨道。 */
+    fun hasTracks(): Boolean {
+        return dmTrackView.allTrack().isNotEmpty()
+    }
+
+    /** 保存当前播放进度、弹幕轨道列表和最后使用的轨道到播放信息文件。 */
+    fun saveCacheInfo(process: Long, update: Boolean = true, track: DmTrack? = null) {
+        val videoData = currentVideoData() ?: return
+        if (update) {
+            PlayHelper.updateInfo(
+                context,
+                scope,
+                videoData,
+                process,
+                dmTrackView.allTrack(),
+                track ?: dmTrackView.allTrack().lastOrNull()
+            )
+        } else {
+            PlayHelper.saveInfo(
+                context,
+                scope,
+                videoData,
+                process,
+                dmTrackView.allTrack(),
+                track ?: dmTrackView.allTrack().lastOrNull()
+            )
+        }
+    }
+
+    /** 根据轨道类型加载 XML 或 ZIP 内的弹幕内容。 */
+    private fun loadTrack(track: DmTrack) {
+        danmakuView.release()
+        if (track.mineType == ZipXmlLoader.ZIP) {
+            loadZipTrack(track)
+        } else {
+            danmakuView.loadDanMu(track.path)
+            setDmList(track.path)
+        }
+    }
+
+    /** 异步读取 ZIP 内的 XML 弹幕，并把错误状态转换为用户可见提示。 */
+    private fun loadZipTrack(track: DmTrack) {
+        scope.launch(Dispatchers.IO) {
+            val fileEntity = FileEntity(
+                name = track.title,
+                title = track.title,
+                path = track.path,
+                mimeType = track.mineType
+            )
+            val result = ZipXmlLoader.loadXmlFromZipResult(fileEntity, track.password)
+            when (result.state) {
+                ZipXmlLoader.OpenResultState.SUCCESS -> {
+                    val byteArray = result.stream?.use { it.readBytes() }
+                    val dmList = byteArray?.let {
+                        XmlConverter.fromXmlInput(ByteArrayInputStream(it)).list
+                    }.orEmpty()
+                    withContext(Dispatchers.Main) {
+                        if (byteArray == null) {
+                            clearPanels()
+                            longVideoControlView.showTips("弹幕读取失败")
+                            return@withContext
+                        }
+                        danmakuView.loadDanMu(ByteArrayInputStream(byteArray))
+                        applyList(dmList)
+                    }
+                }
+
+                ZipXmlLoader.OpenResultState.WRONG_PASSWORD -> {
+                    withContext(Dispatchers.Main) {
+                        clearPanels()
+                        longVideoControlView.showTips("弹幕密码错误，请重新选择")
+                    }
+                }
+
+                ZipXmlLoader.OpenResultState.UNSUPPORTED_METHOD -> {
+                    withContext(Dispatchers.Main) {
+                        clearPanels()
+                        longVideoControlView.showTips("压缩包方法不支持")
+                    }
+                }
+
+                ZipXmlLoader.OpenResultState.ENTRY_NOT_FOUND -> {
+                    withContext(Dispatchers.Main) {
+                        clearPanels()
+                        longVideoControlView.showTips("压缩包条目不存在")
+                    }
+                }
+
+                ZipXmlLoader.OpenResultState.ERROR -> {
+                    withContext(Dispatchers.Main) {
+                        clearPanels()
+                        longVideoControlView.showTips("弹幕读取失败")
+                    }
+                }
+            }
+        }
+    }
+
+    /** 异步解析 XML 文件并刷新弹幕列表/密度曲线。 */
+    private fun setDmList(path: String) {
+        scope.launch(Dispatchers.IO) {
+            val dmList = XmlConverter.fromXmlFile(path).list
+            withContext(Dispatchers.Main) {
+                applyList(dmList)
+            }
+        }
+    }
+
+    /** 刷新弹幕列表面板，并根据弹幕时间分布更新进度条密度曲线。 */
+    private fun applyList(items: List<DmItem>) {
+        val list = items.sortedBy { it.time }
+        if (list.isEmpty()) {
+            clearPanels()
+            return
+        }
+        dmListView.setDmList(list)
+        val countList = list.map { item -> (item.time * 1000).toLong() }
+        val curveData = if (countList.isEmpty()) {
+            floatArrayOf()
+        } else {
+            DensityCalculator.calculateDensity(countList, videoView.duration)
+        }
+        longVideoControlView.updateCurveData(curveData)
+    }
+
+    /** 应用持久化的自定义弹幕字体。 */
+    private fun setDmFont() {
+        if (spUtil.dmFontMode) {
+            spUtil.dmCurrentFont?.let {
+                if (it.isNotBlank()) {
+                    val file = File(it)
+                    if (file.exists()) {
+                        danmakuView.setTypeface(Typeface.createFromFile(file))
+                        dmConfView.setCustomFont(it)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 合并已勾选的弹幕轨道，可选择只内存加载或保存为 XML 文件。 */
+    private fun merge(onSave: Boolean) {
+        if (isMerge()) {
+            longVideoControlView.showTips("正在合并，清稍等")
+            return
+        }
+        val dmTrackList = dmTrackView.listSelectedTrack()
+        if (dmTrackList.isEmpty()) {
+            return
+        }
+        setMergeState(true)
+        scope.launch(Dispatchers.IO) {
+            if (onSave) {
+                val file = AppFile(context).buildCustom(
+                    "xml",
+                    "${currentVideoName()}.xml"
+                )
+                val success = AtomicInteger(dmTrackList.size)
+                XmlMerger.mergeXmlParts(dmTrackList, file) { name, message ->
+                    if (message.isNotBlank()) {
+                        success.getAndDecrement()
+                        scope.launch(Dispatchers.Main) {
+                            longVideoControlView.showSubTips("$name $message")
+                        }
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    longVideoControlView.showTips("${success.get()}个文件合并成功")
+                }
+            } else {
+                ByteArrayOutputStream().use { outputStream ->
+                    XmlMerger.mergeXmlParts(dmTrackList, outputStream) { name, message ->
+                        if (message.isNotBlank()) {
+                            scope.launch(Dispatchers.Main) {
+                                longVideoControlView.showSubTips("$name $message")
+                            }
+                        }
+                    }
+                    val byteArray = outputStream.toByteArray()
+                    ByteArrayInputStream(byteArray).use { inputStream ->
+                        withContext(Dispatchers.Main) {
+                            try {
+                                danmakuView.release()
+                                danmakuView.loadDanMu(inputStream)
+                                longVideoControlView.showTips("合并装载成功")
+                            } catch (e: Exception) {
+                                FileOperator.writeText(
+                                    scope,
+                                    AppFile(context).buildCustom(
+                                        "logs",
+                                        "dm_track_merge_${System.currentTimeMillis()}.log"
+                                    ),
+                                    e.stackTraceToString()
+                                )
+                            }
+                        }
+                    }
+                    ByteArrayInputStream(byteArray).use { inputStream ->
+                        val dmList = XmlConverter.fromXmlInput(inputStream).list
+                        withContext(Dispatchers.Main) {
+                            applyList(dmList)
+                        }
+                    }
+                }
+            }
+            withContext(Dispatchers.Main) {
+                setMergeState(false)
+            }
+        }
+    }
+}
