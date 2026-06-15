@@ -136,9 +136,10 @@ class ShortVideoActivity : BaseActivity() {
     private lateinit var mController: ShortVideoController
     private lateinit var subtitleControlView: SubtitleControlView
     private lateinit var mViewPagerImpl: RecyclerView
+    // 三个设置/评论/更多弹窗统一改为 lazy，避免 onResume 早于异步 initData 完成时
     private val shortSettingsDialog by lazy { ShortSettingsDialog() }
-    private lateinit var shortCommentDialog: ShortCommentDialog
-    private lateinit var shortMoreDialog: ShortMoreDialog
+    private val shortCommentDialog by lazy { ShortCommentDialog() }
+    private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
     private val isUserScroll = AtomicBoolean(false)
     private val playbackLogCache = PlaybackLogCache()
@@ -168,10 +169,10 @@ class ShortVideoActivity : BaseActivity() {
             scope = lifecycleScope,
             spUtil = spUtil,
             mediaData = { mediaData },
-            videoList = mVideoList,
+            videoList = { mVideoList },
             currentPosition = { mCurPos },
-            adapter = mShortVideoAdapter,
-            controller = mController,
+            adapter = { mShortVideoAdapter },
+            controller = { mController },
             currentControlView = { findCurrentShortVideoControlView() },
             removeItem = ::removeItem
         )
@@ -306,10 +307,6 @@ class ShortVideoActivity : BaseActivity() {
             MediaManger.scanVideoThumb(baseContext, mVideoList.toList())
         }
 
-        //shortSettingsDialog = ShortSettingsDialog()
-        shortCommentDialog = ShortCommentDialog()
-        shortMoreDialog = ShortMoreDialog()
-
         initViewPager()
         initVideoView()
 
@@ -333,10 +330,6 @@ class ShortVideoActivity : BaseActivity() {
         }
         // 评论弹窗只绑定一次，后续增删逻辑全部在 controller 内完成。
         shortCommentController.bind(shortCommentDialog)
-    }
-
-    private fun loadCommentCount(videoId: String): Int {
-        return shortCommentController.loadCommentCount(videoId)
     }
 
     private fun updateCommentCount(count: Int) {
@@ -647,7 +640,7 @@ class ShortVideoActivity : BaseActivity() {
                 mCurPos = position
 
                 lifecycleScope.launch(Dispatchers.IO) {
-                    val commentCount = loadCommentCount(videoBean.id)
+                    val commentCount = shortCommentController.loadCommentCount(videoBean.id)
                     withContext(Dispatchers.Main) {
                         viewHolder.shortVideoControlView.setCommentCount(commentCount)
                     }

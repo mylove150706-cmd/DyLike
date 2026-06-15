@@ -26,16 +26,18 @@ import java.io.File
  *
  * 这里封装重命名、删除和分享，统一处理本地文件与媒体库存储源解析。Activity 通过回调
  * 提供当前播放位置和 UI 刷新动作，避免文件 IO 逻辑和页面播放编排混在一起。
+ *
+ * 列表/adapter/controller 均以函数形式注入，保证页面重建或字段重新赋值后仍能读到最新引用。
  */
 class ShortVideoFileActions(
     private val activity: FragmentActivity,
     private val scope: CoroutineScope,
     private val spUtil: SpUtil,
     private val mediaData: () -> MediaData?,
-    private val videoList: MutableList<VideoData>,
+    private val videoList: () -> MutableList<VideoData>,
     private val currentPosition: () -> Int,
-    private val adapter: ShortVideoAdapter,
-    private val controller: ShortVideoController,
+    private val adapter: () -> ShortVideoAdapter,
+    private val controller: () -> ShortVideoController,
     private val currentControlView: () -> ShortVideoControlView?,
     private val removeItem: (Int) -> Unit
 ) {
@@ -43,6 +45,7 @@ class ShortVideoFileActions(
     /** 打开重命名弹窗，并在确认后执行本地或远程存储重命名。 */
     fun showRenameDialog() {
         val position = currentPosition()
+        val videoList = videoList()
         if (position !in videoList.indices) return
         val videoData = videoList[position]
         val extension = videoData.videoUrl.substringAfterLast(".", "")
@@ -57,7 +60,7 @@ class ShortVideoFileActions(
     /** 打开删除确认框，确认后删除当前视频并回调 Activity 移除页面数据。 */
     fun showDeleteConfirmDialog() {
         val position = currentPosition()
-        if (position !in videoList.indices) return
+        if (position !in videoList().indices) return
         AlertDialog.Builder(activity)
             .setTitle(R.string.hint_delete_video)
             .setMessage(R.string.hint_delete_video_desc)
@@ -71,6 +74,7 @@ class ShortVideoFileActions(
     /** 分享当前视频；远程文件会先下载到外部缓存目录再通过 FileProvider 暴露。 */
     fun shareVideo() {
         val position = currentPosition()
+        val videoList = videoList()
         if (position !in videoList.indices) return
         val videoData = videoList[position]
 
@@ -126,6 +130,7 @@ class ShortVideoFileActions(
 
     /** 在 IO 线程执行重命名，并在主线程同步列表标题和控制器标题。 */
     private fun renameVideo(position: Int, newName: String) {
+        val videoList = videoList()
         if (position !in videoList.indices) return
         val videoData = videoList[position]
         val oldPath = videoData.videoUrl
@@ -158,9 +163,9 @@ class ShortVideoFileActions(
                     val newPath = oldPath.substring(0, oldPath.lastIndexOf("/") + 1) + newName
                     videoData.name = newName
                     videoData.videoUrl = newPath
-                    adapter.notifyItemChanged(position)
+                    adapter().notifyItemChanged(position)
                     currentControlView()?.setTitle(newName)
-                    controller.setTitle(newName)
+                    controller().setTitle(newName)
                     Toast.makeText(activity, activity.getString(R.string.action_rename) + "成功", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(activity, activity.getString(R.string.action_rename) + "失败", Toast.LENGTH_SHORT).show()
@@ -171,6 +176,7 @@ class ShortVideoFileActions(
 
     /** 在 IO 线程执行删除，并在成功后移除当前 ViewPager 数据项。 */
     private fun deleteVideo(position: Int) {
+        val videoList = videoList()
         if (position !in videoList.indices) return
         val videoData = videoList[position]
         val path = videoData.videoUrl

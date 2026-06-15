@@ -282,6 +282,11 @@ class LongDanmakuController(
         }
     }
 
+    /** 把动作投递到主线程；用 videoView.post 取代 runOnUiThread，避免每个回调起一个协程。 */
+    private fun postOnMain(action: () -> Unit) {
+        videoView.post(action)
+    }
+
     /** 根据轨道类型加载 XML 或 ZIP 内的弹幕内容。 */
     private fun loadTrack(track: DmTrack) {
         danmakuView.release()
@@ -406,15 +411,22 @@ class LongDanmakuController(
         setMergeState(true)
         scope.launch(Dispatchers.IO) {
             if (onSave) {
-                val file = AppFile(context).buildCustom(
-                    "xml",
-                    "${currentVideoName()}.xml"
-                )
+                // 合并是异步操作，切走视频后 name 可能变空；此时放弃保存，避免生成无名 .xml。
+                val currentName = currentVideoName()
+                if (currentName.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        longVideoControlView.showTips("视频已切换，合并取消")
+                        setMergeState(false)
+                    }
+                    return@launch
+                }
+                val file = AppFile(context).buildCustom("xml", "${currentName}.xml")
                 val success = AtomicInteger(dmTrackList.size)
                 XmlMerger.mergeXmlParts(dmTrackList, file) { name, message ->
                     if (message.isNotBlank()) {
                         success.getAndDecrement()
-                        scope.launch(Dispatchers.Main) {
+                        // 合并回调在 IO 线程同步触发 N 次，用 view.post 比 scope.launch(Main) 轻。
+                        postOnMain {
                             longVideoControlView.showSubTips("$name $message")
                         }
                     }
@@ -426,7 +438,7 @@ class LongDanmakuController(
                 ByteArrayOutputStream().use { outputStream ->
                     XmlMerger.mergeXmlParts(dmTrackList, outputStream) { name, message ->
                         if (message.isNotBlank()) {
-                            scope.launch(Dispatchers.Main) {
+                            postOnMain {
                                 longVideoControlView.showSubTips("$name $message")
                             }
                         }

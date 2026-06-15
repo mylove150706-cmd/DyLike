@@ -28,13 +28,11 @@ import me.lingci.dy.player.util.SpUtil
 import me.lingci.dy.player.util.VideoListTempStore
 import me.lingci.dy.player.view.LongVideoControlView
 import me.lingci.lib.base.entity.TitleItem
-import me.lingci.lib.base.storage.entity.FileEntity
 import me.lingci.lib.base.storage.entity.StorageType
 import me.lingci.lib.base.ui.BaseActivity
 import me.lingci.lib.base.util.AppFile
 import me.lingci.lib.base.util.FileOperator
 import me.lingci.lib.base.util.Log
-import me.lingci.lib.base.util.ToastUtil
 import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.player.danmaku.PlayerInitializer
@@ -137,17 +135,9 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private lateinit var mediaInfoControlView: MediaInfoControlView
     private val playbackLogCache = PlaybackLogCache()
     // 只负责调试态起播黑屏诊断，后台恢复策略仍留在 Activity 内统一编排。
-    private val blackScreenWatchdog by lazy {
-        BlackScreenWatchdog(
-            context = this,
-            scope = lifecycleScope,
-            videoView = videoView,
-            playbackLogCache = playbackLogCache,
-            currentPosition = { mCurPos },
-            showSubTips = { longVideoControlView.showSubTips(it) },
-            logAndCache = ::logAndCache
-        )
-    }
+    // 用 nullable var 而非 by lazy：仅当真正进入调试态起播时才构造，onDestroy 的 cancel
+    // 在从未构造时直接跳过，避免非 debug 会话每次退出浪费一次空对象分配。
+    private var blackScreenWatchdog: BlackScreenWatchdog? = null
     private var backgroundRecoveryJob: Job? = null
     private val mediaPlaybackRecorder by lazy { MediaPlaybackRecorder(spUtil) }
     // 轨道能力查询仍依赖当前 videoView，面板交互和字幕 cue 开关交给 controller。
@@ -678,12 +668,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         if (!spUtil.debugMode) {
             return
         }
-        // 诊断逻辑已抽出；Activity 只控制是否在调试模式启动检测。
-        blackScreenWatchdog.start(position, title, playUrl)
+        // 诊断逻辑已抽出；Activity 只控制是否在调试模式启动检测。首次进入调试态时才构造。
+        ensureBlackScreenWatchdog().start(position, title, playUrl)
     }
 
     private fun cancelBlackScreenWatchdog() {
-        blackScreenWatchdog.cancel()
+        blackScreenWatchdog?.cancel()
+    }
+
+    private fun ensureBlackScreenWatchdog(): BlackScreenWatchdog {
+        return blackScreenWatchdog ?: BlackScreenWatchdog(
+            context = this,
+            scope = lifecycleScope,
+            videoView = videoView,
+            playbackLogCache = playbackLogCache,
+            currentPosition = { mCurPos },
+            showSubTips = { longVideoControlView.showSubTips(it) },
+            logAndCache = ::logAndCache
+        ).also { blackScreenWatchdog = it }
     }
 
     private fun saveMediaInfo(url: String) {
@@ -979,9 +981,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         mediaInfoControlView.setProviderName(
             if (capabilities.canProvideMediaInfo) owner?.getMediaInfoProviderName().orEmpty() else ""
         )
-        val videoData = if (itemViewModel.getItemSize() > mCurPos) itemViewModel.getItem(mCurPos) else null
-        if (videoData != null) {
-            val vd = videoData
+        val vd = if (itemViewModel.getItemSize() > mCurPos) itemViewModel.getItem(mCurPos) else null
+        if (vd != null) {
             val position = mCurPos
             // playUrl() 可能执行同步网络请求，需在IO线程调用
             lifecycleScope.launch(Dispatchers.IO) {
