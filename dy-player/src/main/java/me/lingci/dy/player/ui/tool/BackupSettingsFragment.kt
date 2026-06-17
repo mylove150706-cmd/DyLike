@@ -141,6 +141,10 @@ class BackupSettingsFragment : BaseFragment() {
         data.putValue("shortPlayNext", spUtil.shortPlayNext)
         data.putValue("shortLifeSpeed", spUtil.shortLifeSpeed)
         data.putValue("shortRightSpeed", spUtil.shortRightSpeed)
+        data.putValue("shortTitleStrategy", spUtil.shortTitleStrategy)
+        data.putValue("shortTitleDelimiter", spUtil.shortTitleDelimiter!!)
+        data.putValue("shortTitleRegex", spUtil.shortTitleRegex!!)
+        data.putValue("shortTitleMaxLines", spUtil.shortTitleMaxLines)
         // base
         data.putValue("debugMode", spUtil.debugMode)
         data.putValue("showDm", spUtil.showDm)
@@ -403,6 +407,18 @@ class BackupSettingsFragment : BaseFragment() {
                 }
                 if (data.hasKey("shortRightSpeed")) {
                     spUtil.shortRightSpeed = data.getFloat("shortRightSpeed")
+                }
+                if (data.hasKey("shortTitleStrategy")) {
+                    spUtil.shortTitleStrategy = data.getInt("shortTitleStrategy")
+                }
+                if (data.hasKey("shortTitleDelimiter")) {
+                    spUtil.shortTitleDelimiter = data.getString("shortTitleDelimiter")
+                }
+                if (data.hasKey("shortTitleRegex")) {
+                    spUtil.shortTitleRegex = data.getString("shortTitleRegex")
+                }
+                if (data.hasKey("shortTitleMaxLines")) {
+                    spUtil.shortTitleMaxLines = data.getInt("shortTitleMaxLines")
                 }
                 LibraryCompat.migrateIfNeeded(spUtil)
                 DialogHelper.createMsg(requireContext(), "还原APP数据", "导入完成", "确认").show()

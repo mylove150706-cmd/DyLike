@@ -6,10 +6,12 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import me.lingci.dy.player.databinding.FragmentPlayerSettingBinding
 import me.lingci.dy.player.core.DyPlayerCore
+import me.lingci.dy.player.core.ShortTitleStrategy
+import me.lingci.dy.player.databinding.FragmentPlayerSettingBinding
 import me.lingci.dy.player.util.SpUtil
 import me.lingci.lib.base.ui.BaseFragment
+import me.lingci.lib.player.danmaku.PlayerInitializer
 
 /**
  * 播放设置
@@ -70,6 +72,32 @@ class PlayerSettingsFragment : BaseFragment() {
         binding.swShortRender.setOnClickListener {
             spUtil.sortRender = binding.swShortRender.isChecked
         }
+
+        // 短视频标题策略入口
+        updateShortTitleStrategySummary()
+        binding.shortTitleStrategy.setOnClickListener {
+            val dialog = ShortTitleStrategyDialog()
+            dialog.onValueListener { strategy, delimiter, regex, maxLines ->
+                spUtil.shortTitleStrategy = strategy
+                spUtil.shortTitleDelimiter = delimiter
+                spUtil.shortTitleRegex = regex
+                spUtil.shortTitleMaxLines = maxLines
+                // 同步运行时缓存
+                PlayerInitializer.Player.shortTitleStrategy = strategy
+                PlayerInitializer.Player.shortTitleDelimiter = delimiter
+                PlayerInitializer.Player.shortTitleRegex = regex
+                PlayerInitializer.Player.shortTitleMaxLines = maxLines
+                updateShortTitleStrategySummary()
+            }
+            dialog.arguments = ShortTitleStrategyDialog.buildArgs(
+                spUtil.shortTitleStrategy,
+                spUtil.shortTitleDelimiter!!,
+                spUtil.shortTitleRegex!!,
+                spUtil.shortTitleMaxLines
+            )
+            dialog.show(childFragmentManager, "short_title_strategy")
+        }
+
         binding.swExoHttp.isChecked = spUtil.useOkhttp
         binding.swExoHttp.setOnClickListener {
             spUtil.useOkhttp = binding.swExoHttp.isChecked
@@ -115,6 +143,12 @@ class PlayerSettingsFragment : BaseFragment() {
         }
 
         updateFadeDependentOptions()
+    }
+
+    private fun updateShortTitleStrategySummary() {
+        val strategy = ShortTitleStrategy.fromValue(spUtil.shortTitleStrategy)
+        binding.tvShortTitleStrategyCurrent.text =
+            if (strategy == ShortTitleStrategy.RAW) "原始显示" else strategy.displayName
     }
 
     private fun updateCoreDependentOptions() {

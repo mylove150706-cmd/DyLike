@@ -39,6 +39,14 @@ object PlayerInitializer {
         var shortAutoNext = false
         var shortShowSysBar = true
         var shortShowMore = true
+
+        // 短视频标题策略运行时副本（从 dy-player 的 SpUtil 同步，用基础类型避免跨模块枚举依赖）。
+        // shortTitleStrategy 存 ShortTitleStrategy.value（0=RAW 1=SPLIT_ALL 2=FIRST_LINE 3=REGEX_FIRST），
+        // 由 dy-player 侧自行 fromValue() 还原。
+        var shortTitleStrategy: Int = 0
+        var shortTitleDelimiter: String = "-"
+        var shortTitleRegex: String = ""
+        var shortTitleMaxLines: Int = 0
     }
 
     object Danmu {

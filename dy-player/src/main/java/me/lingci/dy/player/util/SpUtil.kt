@@ -3,6 +3,7 @@ package me.lingci.dy.player.util
 import android.content.Context
 import android.preference.PreferenceManager
 import me.lingci.dy.player.core.DyPlayerCore
+import me.lingci.dy.player.core.ShortTitleStrategy
 import me.lingci.lib.base.util.SpBase
 
 /**
@@ -117,6 +118,18 @@ open class SpUtil(context: Context) : SpBase(context) {
     var loopList by SPManager.boolean(true)
 
     var showShortTitle by SPManager.boolean(true)
+
+    // 短视频标题策略：RAW(0)原始显示 / SPLIT_ALL(1)分隔符换行 / FIRST_LINE(2)首行提取 / REGEX_FIRST(3)正则首行+分隔符
+    var shortTitleStrategy by SPManager.int(ShortTitleStrategy.RAW.value)
+
+    // 短视频标题分隔符（单字符，默认 "-"；非法时格式化器回退为 "-"）
+    var shortTitleDelimiter by SPManager.string("-")
+
+    // 短视频标题首行提取正则（仅 REGEX_FIRST 模式用；空则回退为 FIRST_LINE 语义）
+    var shortTitleRegex by SPManager.string("")
+
+    // 短视频标题最大行数（超过则末行合并剩余；0 表示不限制）
+    var shortTitleMaxLines by SPManager.int(0)
 
     var showShortLike by SPManager.boolean(true)
 

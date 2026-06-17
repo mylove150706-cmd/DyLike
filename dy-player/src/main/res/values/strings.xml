@@ -123,6 +123,19 @@
     <string name="hint_audio_fade_out_duration">渐出时长</string>
     <string name="hint_audio_fade_out_duration_desc">视频接近结束时音量从正常到静音的时间</string>
 
+    <string name="hint_short_title_strategy">短视频标题策略</string>
+    <string name="hint_short_title_strategy_desc">对视频文件名进行换行、提取等处理</string>
+    <string name="hint_short_title_strategy_current">当前：原始显示</string>
+    <string name="hint_short_title_strategy_dialog">短视频标题策略设置</string>
+    <string name="hint_short_title_strategy_mode">策略模式</string>
+    <string name="hint_short_title_strategy_delimiter">分隔符</string>
+    <string name="hint_short_title_strategy_delimiter_desc">单字符，如 - _ · |</string>
+    <string name="hint_short_title_strategy_regex">首行提取正则</string>
+    <string name="hint_short_title_strategy_regex_desc">仅「正则首行」模式生效，留空回退为首行提取</string>
+    <string name="hint_short_title_strategy_max_lines">最大行数</string>
+    <string name="hint_short_title_strategy_preview">预览效果</string>
+    <string name="hint_short_title_strategy_preview_hint">调整参数后实时预览</string>
+
     <string name="action_edit">编辑</string>
     <string name="action_exit">退出</string>
     <string name="action_goto_update">前往更新</string>

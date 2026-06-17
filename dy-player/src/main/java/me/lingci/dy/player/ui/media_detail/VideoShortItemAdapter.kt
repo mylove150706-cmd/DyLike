@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.recyclerview.widget.DiffUtil
 import com.bumptech.glide.Glide
 import android.view.View
 import me.lingci.dy.player.R
@@ -18,6 +19,12 @@ import java.io.File
 class VideoShortItemAdapter(
     private val dataSet: MutableList<VideoData>
 ) : BaseAdapter<VideoData, ItemVideoShortListBinding>(dataSet) {
+
+    companion object {
+        // 缩略图宽高比缓存：key 为 videoUrl 的 md5，value 为宽高比字符串
+        // 避免每次 bindData 都通过 BitmapFactory 解码图片尺寸造成 IO 开销
+        private val ratioCache = mutableMapOf<String, String>()
+    }
 
     private var onLongItemClick: ((v: View, item: VideoData, position: Int) -> Unit)? = null
     private var batchMode = false
@@ -34,22 +41,34 @@ class VideoShortItemAdapter(
         item: VideoData,
         position: Int
     ) {
+        val cacheKey = CodeUtil.md5(item.videoUrl)
         File(
             binding.ivThumb.context.externalCacheDir,
-            ".thumb/${CodeUtil.md5(item.videoUrl)}.${AppUtil.THUMB_TYPE}"
-        ).let {
-            if (it.exists()) {
+            ".thumb/${cacheKey}.${AppUtil.THUMB_TYPE}"
+        ).let { thumbFile ->
+            if (thumbFile.exists()) {
                 val params: ConstraintLayout.LayoutParams = binding.ivThumb.layoutParams as ConstraintLayout.LayoutParams
-                try {
-                    val wh = getWh(it.path)
-                    val width = wh.first
-                    val height = wh.second
-                    params.dimensionRatio = if (width > 0 && height > 0 && height > width) "${width}:${height}" else "1:1"
-                } catch (e: Exception) {
-                    params.dimensionRatio = "3:4"
+                // 优先从缓存获取宽高比，避免重复解码图片
+                val cachedRatio = ratioCache[cacheKey]
+                if (cachedRatio != null) {
+                    params.dimensionRatio = cachedRatio
+                } else {
+                    try {
+                        val wh = getWh(thumbFile.path)
+                        val width = wh.first
+                        val height = wh.second
+                        val ratio = if (width > 0 && height > 0 && height > width) "${width}:${height}" else "1:1"
+                        params.dimensionRatio = ratio
+                        ratioCache[cacheKey] = ratio
+                    } catch (e: Exception) {
+                        params.dimensionRatio = "3:4"
+                    }
                 }
                 binding.ivThumb.layoutParams = params
-                Glide.with(binding.ivThumb.context).load(it).into(binding.ivThumb)
+                // 保留当前图片作为占位，避免刷新闪烁；drawable 可能为 null（首次加载时）
+                val request = Glide.with(binding.ivThumb.context).load(thumbFile)
+                binding.ivThumb.drawable?.let { request.placeholder(it) }
+                request.into(binding.ivThumb)
             } else {
                 loadDefault(binding)
             }
@@ -138,27 +157,56 @@ class VideoShortItemAdapter(
         notifyAllChanged()
     }
 
+    /**
+     * 使用 DiffUtil 增量更新数据，替代 BaseAdapter 的全量 notifyDataSetChanged
+     * 注意：此方法直接操作 dataSet（与父类 dataList 同一引用），保持数据源一致
+     * 用于搜索过滤、排序等场景，避免瀑布流位置跳动
+     */
+    fun updateDataWithDiff(newData: List<VideoData>) {
+        val oldList = dataSet.toList()
+        val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = oldList.size
+            override fun getNewListSize(): Int = newData.size
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                return oldList[oldItemPosition].beanId() == newData[newItemPosition].beanId()
+            }
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                val old = oldList[oldItemPosition]
+                val new = newData[newItemPosition]
+                return old.name == new.name
+                        && old.videoUrl == new.videoUrl
+                        && old.lastPlay == new.lastPlay
+                        && old.type == new.type
+            }
+        })
+        dataSet.clear()
+        dataSet.addAll(newData)
+        diffResult.dispatchUpdatesTo(this)
+    }
+
     fun sorted() {
-        dataSet.reverse()
-        notifyAllChanged()
+        val reversed = dataSet.reversed().toMutableList()
+        updateDataWithDiff(reversed)
     }
 
     fun sortByName(ascending: Boolean) {
-        dataSet.sortBy { it.name.lowercase() }
-        if (!ascending) dataSet.reverse()
-        notifyAllChanged()
+        val sorted = dataSet.toMutableList()
+        sorted.sortBy { it.name.lowercase() }
+        if (!ascending) sorted.reverse()
+        updateDataWithDiff(sorted)
     }
 
     fun sortByModifiedTime(ascending: Boolean) {
-        dataSet.sortBy { videoData ->
+        val sorted = dataSet.toMutableList()
+        sorted.sortBy { videoData ->
             if (videoData.type == StorageType.LOCAL_STORAGE) {
                 File(videoData.videoUrl).lastModified()
             } else {
                 0L
             }
         }
-        if (!ascending) dataSet.reverse()
-        notifyAllChanged()
+        if (!ascending) sorted.reverse()
+        updateDataWithDiff(sorted)
     }
 
     fun getLastPlayPosition(): Int {
@@ -168,6 +216,22 @@ class VideoShortItemAdapter(
     fun updateLastPlay(playLast: String) {
         dataSet.forEach { it.lastPlay = it.videoUrl == playLast }
         notifyAllChanged()
+    }
+
+    /**
+     * 精确更新 lastPlay 标记，只刷新变化的 item
+     * @return Pair(旧lastPlay位置, 新lastPlay位置)，-1 表示无
+     */
+    fun updateLastPlayPrecise(playLast: String): Pair<Int, Int> {
+        var oldPosition = -1
+        var newPosition = -1
+        dataSet.forEachIndexed { index, videoData ->
+            val wasLastPlay = videoData.lastPlay
+            videoData.lastPlay = videoData.videoUrl == playLast
+            if (wasLastPlay && !videoData.lastPlay) oldPosition = index
+            if (videoData.lastPlay) newPosition = index
+        }
+        return oldPosition to newPosition
     }
 
 }

@@ -14,6 +14,7 @@ import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
 import me.lingci.dy.player.ui.media_detail.RenameDialog
 import me.lingci.dy.player.util.LibraryCompat
+import me.lingci.dy.player.util.ShortTitleFormatter
 import me.lingci.dy.player.util.SpUtil
 import me.lingci.dy.player.view.ShortVideoControlView
 import me.lingci.dy.player.view.ShortVideoController
@@ -164,8 +165,9 @@ class ShortVideoFileActions(
                     videoData.name = newName
                     videoData.videoUrl = newPath
                     adapter().notifyItemChanged(position)
-                    currentControlView()?.setTitle(newName)
-                    controller().setTitle(newName)
+                    val displayTitle = ShortTitleFormatter.format(newName)
+                    currentControlView()?.setTitle(displayTitle)
+                    controller().setTitle(displayTitle)
                     Toast.makeText(activity, activity.getString(R.string.action_rename) + "成功", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(activity, activity.getString(R.string.action_rename) + "失败", Toast.LENGTH_SHORT).show()

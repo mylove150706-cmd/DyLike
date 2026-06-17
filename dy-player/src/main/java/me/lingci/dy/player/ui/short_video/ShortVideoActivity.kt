@@ -31,6 +31,7 @@ import me.lingci.dy.player.util.PlaybackErrorLogger
 import me.lingci.dy.player.util.PlaybackLogCache
 import me.lingci.dy.player.util.PlaybackTraceHelper
 import me.lingci.dy.player.util.SpUtil
+import me.lingci.dy.player.util.ShortTitleFormatter
 import me.lingci.dy.player.util.VideoListTempStore
 import me.lingci.dy.player.view.ShortVideoControlView
 import me.lingci.dy.player.view.ShortVideoController
@@ -213,6 +214,11 @@ class ShortVideoActivity : BaseActivity() {
         PlaybackTraceHelper.clearSurfaceTrace()
     }
 
+    /** 根据短视频标题策略格式化文件名为展示标题（参数从运行时缓存读取）。 */
+    private fun formatShortTitle(rawName: String): String {
+        return ShortTitleFormatter.format(rawName)
+    }
+
     private fun fromOpen() {
         val filepath = intent?.let { AppUtil.parsePathFromIntent(it) }
         if (filepath == null) {
@@ -253,6 +259,11 @@ class ShortVideoActivity : BaseActivity() {
             spUtil.showSysBar,
             spUtil.showShortMore
         )
+        // 同步短视频标题策略运行时缓存
+        PlayerInitializer.Player.shortTitleStrategy = spUtil.shortTitleStrategy
+        PlayerInitializer.Player.shortTitleDelimiter = spUtil.shortTitleDelimiter!!
+        PlayerInitializer.Player.shortTitleRegex = spUtil.shortTitleRegex!!
+        PlayerInitializer.Player.shortTitleMaxLines = spUtil.shortTitleMaxLines
         val customRandom = intent.hasExtra(KEY_RANDOM)
         val random = intent.getBooleanExtra(KEY_RANDOM, false)
         val index = intent.getIntExtra(KEY_INDEX, 0)
@@ -627,8 +638,9 @@ class ShortVideoActivity : BaseActivity() {
                         mVideoView.start()
                     }
                 }
-                mController.setTitle(videoBean.name)
-                viewHolder.shortVideoControlView.setTitle(videoBean.name)
+                val displayTitle = formatShortTitle(videoBean.name)
+                mController.setTitle(displayTitle)
+                viewHolder.shortVideoControlView.setTitle(displayTitle)
                 viewHolder.shortVideoControlView.setPage(position, mVideoList.size)
                 mController.addShortVideoControlView(viewHolder.shortVideoControlView)
                 viewHolder.shortVideoControlView.setOnVideoTransformChangedListener {

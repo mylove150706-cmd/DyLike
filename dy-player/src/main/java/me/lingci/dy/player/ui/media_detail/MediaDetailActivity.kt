@@ -146,15 +146,20 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
 
     /**
      * 刷新最后播放记录
+     * 使用精确刷新，只更新 lastPlay 标记变化的 item，避免全量 notifyDataSetChanged 导致瀑布流位置跳动
      */
     private fun refreshLastPlay() {
         val sourceList = LibraryCompat.loadSources(spUtil)
         LibraryCompat.loadMedia(spUtil).firstOrNull { LibraryCompat.sameMedia(it, mediaData, sourceList) }?.let { updatedMedia ->
             mediaData.playLast = updatedMedia.playLast
             if (shortMode) {
-                videoShortItemAdapter.updateLastPlay(mediaData.playLast)
+                val (oldPos, newPos) = videoShortItemAdapter.updateLastPlayPrecise(mediaData.playLast)
+                if (oldPos >= 0) videoShortItemAdapter.notifyItemChanged(oldPos)
+                if (newPos >= 0 && newPos != oldPos) videoShortItemAdapter.notifyItemChanged(newPos)
             } else {
-                mediaDetailAdapter.updateLastPlay(mediaData.playLast)
+                val (oldPos, newPos) = mediaDetailAdapter.updateLastPlayPrecise(mediaData.playLast)
+                if (oldPos >= 0) mediaDetailAdapter.notifyItemChanged(oldPos)
+                if (newPos >= 0 && newPos != oldPos) mediaDetailAdapter.notifyItemChanged(newPos)
             }
         }
     }
@@ -326,7 +331,8 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
             originalVideoData.filter { it.name.contains(keyword, ignoreCase = true) }
         }
         if (shortMode) {
-            videoShortItemAdapter.updateData(filtered)
+            // 短视频模式使用 DiffUtil 增量更新，避免瀑布流位置跳动
+            videoShortItemAdapter.updateDataWithDiff(filtered)
         } else {
             mediaDetailAdapter.updateData(filtered)
         }
@@ -814,6 +820,8 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
             MediaManger.scanVideoThumb(baseContext, videoData.toList())
         }
         if (shortMode) {
+            // 瀑布流高度不固定，关闭 hasFixedSize 优化，避免布局优化失效导致位置跳动
+            binding.recyclerView.setHasFixedSize(false)
             // 短视频模式 - 瀑布流布局
             staggeredLayoutManager = StaggeredGridLayoutManager(3, StaggeredGridLayoutManager.VERTICAL).apply {
                 gapStrategy = StaggeredGridLayoutManager.GAP_HANDLING_NONE
@@ -831,6 +839,8 @@ class MediaDetailActivity : BaseActivity(), MenuProvider {
                 }
             }
         } else {
+            // 线性布局 item 高度一致，保持 hasFixedSize 优化
+            binding.recyclerView.setHasFixedSize(true)
             // 长视频模式 - 线性布局
             binding.recyclerView.layoutManager = LinearLayoutManager(this)
             mediaDetailAdapter.updateData(videoData)

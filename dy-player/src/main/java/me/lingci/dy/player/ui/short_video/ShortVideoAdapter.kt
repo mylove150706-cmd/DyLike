@@ -11,6 +11,7 @@ import me.lingci.dy.player.R
 import me.lingci.dy.player.databinding.ItemShortVideoBinding
 import me.lingci.dy.player.entity.VideoData
 import me.lingci.dy.player.util.AppUtil
+import me.lingci.dy.player.util.ShortTitleFormatter
 import me.lingci.dy.player.view.ShortVideoControlView
 import me.lingci.lib.base.util.md5
 import java.io.File
@@ -68,7 +69,7 @@ class ShortVideoAdapter(
         fun bindItem(item: VideoData) {
             mVideoData = item
             binding.shortVideoView.changeVisibility()
-            binding.shortVideoView.setTitle(item.name.substringBeforeLast("."))
+            binding.shortVideoView.setTitle(ShortTitleFormatter.format(item.name))
             binding.shortVideoView.setLike(item.like)
         }
 
