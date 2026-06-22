@@ -474,6 +474,37 @@ class DmConfControlView : FrameLayout, IControlComponent, OnSeekBarChangeListene
         }
     }
 
+    /**
+     * 重置偏移为 0：清空 UI 显示，并同步全局 offsetPosition。
+     * 供外部（如切换下一集、合并弹幕）在偏移归零时调用，避免 UI 残留旧值。
+     */
+    fun resetOffset() {
+        binding.offsetReset.visibility = GONE
+        binding.offsetValue.text = ""
+        PlayerInitializer.Danmu.offsetPosition = 0
+        onValueChange?.invoke(TYPE_OFFSET, 0)
+    }
+
+    /**
+     * 应用指定偏移量：根据 offset 更新 UI 显示，并同步全局 offsetPosition。
+     * 供外部（如切换轨道时应用 track.offset）调用，确保 UI 与实际生效偏移一致。
+     */
+    @SuppressLint("SetTextI18n")
+    fun applyOffset(offset: Long) {
+        if (offset == 0L) {
+            binding.offsetReset.visibility = GONE
+            binding.offsetValue.text = ""
+        } else if (offset > 0) {
+            binding.offsetReset.visibility = VISIBLE
+            binding.offsetValue.text = "提前 ${(offset.absoluteValue.toFloat() / 1000)} s"
+        } else {
+            binding.offsetReset.visibility = VISIBLE
+            binding.offsetValue.text = "延迟 ${(offset.absoluteValue.toFloat() / 1000)} s"
+        }
+        PlayerInitializer.Danmu.offsetPosition = offset
+        onValueChange?.invoke(TYPE_OFFSET, offset.toInt())
+    }
+
     fun switchVib() {
         if (this.isVisible) {
             this.visibility = GONE

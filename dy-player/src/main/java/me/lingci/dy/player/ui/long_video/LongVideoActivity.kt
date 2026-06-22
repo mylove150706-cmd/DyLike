@@ -2,9 +2,17 @@ package me.lingci.dy.player.ui.long_video
 
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.graphics.drawable.Icon
 import android.net.Uri
+import android.os.Build
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Rational
+import androidx.annotation.RequiresApi
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.viewModels
 import androidx.core.net.toUri
@@ -177,6 +185,28 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
     private var hasPausedForBackgroundRecovery = false
     private var lastKnownPlaybackPosition = 0L
+
+    // ===== PiP 画中画相关状态 =====
+    /** PiP 模式下保存的弹幕字体大小（用于退出 PiP 后恢复） */
+    private var pipSavedDanmakuSize: Int = PlayerInitializer.Danmu.size
+    /** PiP 模式下保存的滚动弹幕最大行数 */
+    private var pipSavedMaxLine: Int = PlayerInitializer.Danmu.maxLine
+    /** PiP 模式下保存的顶部弹幕最大行数 */
+    private var pipSavedMaxTopLine: Int = PlayerInitializer.Danmu.maxTopLine
+    /** PiP 模式下保存的底部弹幕最大行数 */
+    private var pipSavedMaxBottomLine: Int = PlayerInitializer.Danmu.maxBottomLine
+    /** PiP 操作按钮广播接收器 */
+    private val pipActionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                PiPActionReceiver.ACTION_PREV -> onPreviousPlay()
+                PiPActionReceiver.ACTION_PLAY_PAUSE -> togglePlayPause()
+                PiPActionReceiver.ACTION_NEXT -> onNextPlay()
+            }
+        }
+    }
+    /** 标记 PiP 广播接收器是否已注册 */
+    private var isPipReceiverRegistered = false
 
     private fun getPlayerCapabilities(): PlayerCapabilities {
         return videoView.getPlayerCapability(PlayerCapabilityProvider::class.java)
@@ -838,6 +868,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onPause() {
         super.onPause()
+        // PiP 模式下不暂停视频和弹幕，保持小窗继续播放
+        if (isInPictureInPictureMode) {
+            return
+        }
         rememberPlaybackPosition(videoView.currentPosition)
         danmakuView.pause()
         videoView.pause()
@@ -851,6 +885,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onDestroy() {
         super.onDestroy()
+        // 注销 PiP 广播接收器，避免内存泄漏
+        unregisterPipActionReceiver()
         mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
@@ -933,6 +969,14 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         speedControlView.switchVib()
     }
 
+    override fun onEnterPiP() {
+        // 手动点击 PiP 按钮：检查系统支持后进入画中画（不检查自动进入开关，手动点击表示用户明确意图）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            enterPiPMode()
+        }
+    }
+
     override fun onShowMediaInfo() {
         videoController.hide()
         mediaInfoControlView.switchVib()
@@ -974,6 +1018,286 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onFontChange(fontPath: String) {
         longDanmakuController.onFontChange(fontPath)
+    }
+
+    // ===== PiP 画中画模式实现 =====
+
+    /**
+     * 用户离开 Activity 时触发（按 Home 键等）。
+     * 若视频正在播放且系统支持 PiP，则进入小窗模式。
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // 仅在 API 26+ 且视频处于播放状态时进入 PiP
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && shouldEnterPip()) {
+            enterPiPMode()
+        }
+    }
+
+    /**
+     * 判断是否应该进入 PiP 模式。
+     * 需同时满足：用户开启 PiP 开关、系统支持 PiP、视频处于播放中状态。
+     */
+    private fun shouldEnterPip(): Boolean {
+        // 用户未开启 PiP 开关时不进入
+        if (!spUtil.longVideoPip) return false
+        // 系统不支持 PiP 时不进入（API 26+ 才有该特性检测）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            return false
+        }
+        // currentPlayState 为 STATE_PLAYING 时才进入 PiP
+        return videoView.currentPlayState == VideoView.STATE_PLAYING
+    }
+
+    /**
+     * 进入 PiP 画中画模式。
+     * 根据视频实际宽高比构建 PiP 参数，并添加操作按钮。
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun enterPiPMode() {
+        val params = PictureInPictureParams.Builder()
+            .setAspectRatio(calculateVideoAspectRatio())
+            .setActions(buildPipActions())
+            .build()
+        enterPictureInPictureMode(params)
+    }
+
+    /**
+     * 计算视频宽高比，用于 PiP 窗口尺寸。
+     * 若无法获取视频尺寸则默认 16:9。
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun calculateVideoAspectRatio(): Rational {
+        val videoSize = videoView.getVideoSize()
+        val width = videoSize[0]
+        val height = videoSize[1]
+        // 视频尺寸有效且比例合理时使用实际比例，否则默认 16:9
+        return if (width > 0 && height > 0) {
+            Rational(width, height)
+        } else {
+            Rational(16, 9)
+        }
+    }
+
+    /**
+     * PiP 模式切换回调。
+     * 进入 PiP 时隐藏控制器并应用弹幕小窗配置；退出时恢复。
+     */
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode)
+        if (isInPictureInPictureMode) {
+            enterPipUiState()
+        } else {
+            exitPipUiState()
+        }
+    }
+
+    /**
+     * 进入 PiP 模式时的 UI 状态调整。
+     * 隐藏控制器控制栏，关闭浮层面板，弹幕缩小字体并限制最多3行。
+     */
+    private fun enterPipUiState() {
+        // 隐藏控制器控制栏（弹幕组件 onVisibilityChanged 为空实现，不受影响）
+        videoController.hide()
+        // 关闭所有浮层面板（选集、弹幕配置、倍速等）
+        closeAllPanelsForPip()
+        // 弹幕：缩小字体 + 限制最多3行
+        applyPipDanmakuConfig()
+        // 注册 PiP 操作按钮广播接收器
+        registerPipActionReceiver()
+    }
+
+    /**
+     * 退出 PiP 模式时的 UI 状态恢复。
+     * 恢复弹幕原配置，重新显示控制器。
+     */
+    private fun exitPipUiState() {
+        // 恢复弹幕原配置
+        restoreDanmakuConfig()
+        // 注销 PiP 操作按钮广播接收器
+        unregisterPipActionReceiver()
+        // 恢复控制器显示
+        videoController.show()
+    }
+
+    /**
+     * 关闭所有不适合在 PiP 中显示的浮层面板。
+     * 直接设置 visibility = GONE，避免 toggle 逻辑导致状态不确定。
+     */
+    private fun closeAllPanelsForPip() {
+        epSelectView.visibility = android.view.View.GONE
+        dmSelectView.visibility = android.view.View.GONE
+        dmConfView.visibility = android.view.View.GONE
+        videoScaleControlView.visibility = android.view.View.GONE
+        dmTrackView.visibility = android.view.View.GONE
+        dmListView.visibility = android.view.View.GONE
+        mTrackPanelControlView.visibility = android.view.View.GONE
+        speedControlView.visibility = android.view.View.GONE
+        mediaInfoControlView.visibility = android.view.View.GONE
+    }
+
+    /**
+     * 应用 PiP 模式弹幕配置：缩小字体 + 限制最多3行。
+     * 保存原配置以便退出 PiP 时恢复。
+     */
+    private fun applyPipDanmakuConfig() {
+        // 保存原配置
+        pipSavedDanmakuSize = PlayerInitializer.Danmu.size
+        pipSavedMaxLine = PlayerInitializer.Danmu.maxLine
+        pipSavedMaxTopLine = PlayerInitializer.Danmu.maxTopLine
+        pipSavedMaxBottomLine = PlayerInitializer.Danmu.maxBottomLine
+        // 缩小字体至原值的50%，最小不低于10
+        PlayerInitializer.Danmu.size = (pipSavedDanmakuSize * 0.5f).toInt().coerceAtLeast(10)
+        danmakuView.updateDanmuSize()
+        // 限制滚动/顶部/底部弹幕最多3行
+        PlayerInitializer.Danmu.maxLine = 3
+        PlayerInitializer.Danmu.maxTopLine = 3
+        PlayerInitializer.Danmu.maxBottomLine = 3
+        danmakuView.updateMaxLine()
+    }
+
+    /**
+     * 恢复 PiP 模式前的弹幕配置。
+     */
+    private fun restoreDanmakuConfig() {
+        PlayerInitializer.Danmu.size = pipSavedDanmakuSize
+        PlayerInitializer.Danmu.maxLine = pipSavedMaxLine
+        PlayerInitializer.Danmu.maxTopLine = pipSavedMaxTopLine
+        PlayerInitializer.Danmu.maxBottomLine = pipSavedMaxBottomLine
+        danmakuView.updateDanmuSize()
+        danmakuView.updateMaxLine()
+    }
+
+    /**
+     * 构建 PiP 窗口操作按钮列表（最多3个）。
+     * - 上一集
+     * - 播放/暂停（图标随播放状态动态切换）
+     * - 下一集
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun buildPipActions(): List<RemoteAction> {
+        val actions = mutableListOf<RemoteAction>()
+        // 上一集
+        actions.add(
+            createRemoteAction(
+                me.lingci.lib.player.ui.R.drawable.ic_skip_previous,
+                "上一集",
+                PiPActionReceiver.ACTION_PREV,
+                PiPActionReceiver.REQUEST_PREV
+            )
+        )
+        // 播放/暂停（根据当前播放状态切换图标）
+        val playPauseIcon = if (videoView.isPlaying) {
+            me.lingci.lib.player.ui.R.drawable.ic_pause_24
+        } else {
+            me.lingci.lib.player.ui.R.drawable.ic_play_arrow_24
+        }
+        actions.add(
+            createRemoteAction(
+                playPauseIcon,
+                "播放/暂停",
+                PiPActionReceiver.ACTION_PLAY_PAUSE,
+                PiPActionReceiver.REQUEST_PLAY_PAUSE
+            )
+        )
+        // 下一集
+        actions.add(
+            createRemoteAction(
+                me.lingci.lib.player.ui.R.drawable.ic_skip_next,
+                "下一集",
+                PiPActionReceiver.ACTION_NEXT,
+                PiPActionReceiver.REQUEST_NEXT
+            )
+        )
+        return actions
+    }
+
+    /**
+     * 创建单个 RemoteAction。
+     *
+     * @param iconRes 图标资源ID
+     * @param title 操作标题
+     * @param action 广播动作
+     * @param requestCode 请求码
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun createRemoteAction(
+        iconRes: Int,
+        title: String,
+        action: String,
+        requestCode: Int
+    ): RemoteAction {
+        val intent = Intent(action).setPackage(packageName)
+        val pendingIntent = android.app.PendingIntent.getBroadcast(
+            this, requestCode, intent,
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        return RemoteAction(
+            Icon.createWithResource(this, iconRes),
+            title,
+            title,
+            pendingIntent
+        )
+    }
+
+    /**
+     * 切换播放/暂停状态。
+     * PiP 窗口中点击播放/暂停按钮时调用。
+     */
+    private fun togglePlayPause() {
+        if (videoView.isPlaying) {
+            videoView.pause()
+        } else {
+            videoView.start()
+        }
+        // 播放状态变化后刷新 PiP 按钮图标
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            updatePipActions()
+        }
+    }
+
+    /**
+     * 刷新 PiP 窗口的操作按钮（播放/暂停图标随状态切换）。
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun updatePipActions() {
+        if (isInPictureInPictureMode) {
+            val params = PictureInPictureParams.Builder()
+                .setActions(buildPipActions())
+                .build()
+            setPictureInPictureParams(params)
+        }
+    }
+
+    /**
+     * 注册 PiP 操作按钮广播接收器。
+     * API 34+ 需显式指定 RECEIVER_NOT_EXPORTED 标志（广播仅限应用内）。
+     */
+    private fun registerPipActionReceiver() {
+        if (isPipReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(PiPActionReceiver.ACTION_PREV)
+            addAction(PiPActionReceiver.ACTION_PLAY_PAUSE)
+            addAction(PiPActionReceiver.ACTION_NEXT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ 必须指定导出标志
+            registerReceiver(pipActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(pipActionReceiver, filter)
+        }
+        isPipReceiverRegistered = true
+    }
+
+    /**
+     * 注销 PiP 操作按钮广播接收器。
+     */
+    private fun unregisterPipActionReceiver() {
+        if (isPipReceiverRegistered) {
+            unregisterReceiver(pipActionReceiver)
+            isPipReceiverRegistered = false
+        }
     }
 
 }

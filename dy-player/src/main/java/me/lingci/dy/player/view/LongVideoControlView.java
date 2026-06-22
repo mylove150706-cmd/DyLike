@@ -166,6 +166,21 @@ public class LongVideoControlView extends FrameLayout implements IControlCompone
                 mOnLongVideoListener.onSpeedChange();
             }
         });
+        // 手动进入画中画按钮
+        mBinding.ivPip.setOnClickListener(v -> {
+            if (mOnLongVideoListener != null) {
+                mOnLongVideoListener.onEnterPiP();
+            }
+        });
+        // 系统不支持 PiP 时隐藏按钮
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            android.content.pm.PackageManager pm = getContext().getPackageManager();
+            if (!pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                mBinding.ivPip.setVisibility(GONE);
+            }
+        } else {
+            mBinding.ivPip.setVisibility(GONE);
+        }
         mBinding.ivPlayPrevious.setOnClickListener(v -> {
             if (mOnPlayNextListener != null) {
                 mOnPlayNextListener.onPreviousPlay();

@@ -60,6 +60,8 @@
     <string name="hint_auto_next_desc">关闭后将不自动播放下一集</string>
     <string name="hint_loop_list">长视频列表循环播放</string>
     <string name="hint_loop_list_desc">开启后播放到列表首尾时循环，关闭则提示没有更多</string>
+    <string name="hint_long_video_pip">长视频自动进入画中画</string>
+    <string name="hint_long_video_pip_desc">开启后按 Home 键自动进入小窗播放（需系统支持）</string>
     <string name="hint_media_add">添加媒体库</string>
     <string name="hint_media_edit">修改媒体库</string>
     <string name="hint_media_add_default">从选择文件夹开始</string>

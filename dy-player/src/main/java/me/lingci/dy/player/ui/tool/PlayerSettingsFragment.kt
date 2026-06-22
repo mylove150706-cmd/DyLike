@@ -111,6 +111,10 @@ class PlayerSettingsFragment : BaseFragment() {
         binding.swLoopList.setOnClickListener {
             spUtil.loopList = binding.swLoopList.isChecked
         }
+        binding.swLongVideoPip.isChecked = spUtil.longVideoPip
+        binding.swLongVideoPip.setOnClickListener {
+            spUtil.longVideoPip = binding.swLongVideoPip.isChecked
+        }
 
         // 音频渐入渐出设置
         binding.swAudioFade.isChecked = spUtil.audioFadeEnabled

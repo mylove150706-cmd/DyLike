@@ -300,6 +300,18 @@
             app:layout_constraintEnd_toStartOf="@+id/tv_select_dm"
             app:layout_constraintTop_toBottomOf="@+id/play_seekbar"  />
 
+        <!-- 手动进入画中画按钮 -->
+        <ImageView
+            android:id="@+id/iv_pip"
+            android:layout_width="@dimen/dp40"
+            android:layout_height="@dimen/dp40"
+            android:padding="@dimen/dp8"
+            android:src="@drawable/ic_pip"
+            android:contentDescription="@string/app_name"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toStartOf="@+id/tv_play_speed"
+            app:layout_constraintTop_toBottomOf="@+id/play_seekbar" />
+
         <androidx.appcompat.widget.AppCompatSeekBar
             android:id="@+id/play_seekbar"
             android:layout_width="match_parent"

@@ -86,7 +86,9 @@ class DmTrackAdapter(private var items: ArrayList<DmTrack>) :
                 notifyItemChanged(position)
                 if (item.selected.not()) {
                     changeSelect(position)
-                    setOffset(binding, item, item.offset)
+                    // 切换轨道时保持 track.offset 不变，num 应为 0；
+                    // 传 item.offset 会导致 offset = track.offset + item.offset 翻倍
+                    setOffset(binding, item, 0)
                     onChangeTrack?.invoke(item, false, position)
                 }
             }

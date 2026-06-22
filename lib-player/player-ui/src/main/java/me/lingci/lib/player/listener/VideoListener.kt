@@ -27,6 +27,8 @@ interface OnLongVideoListener {
     fun onShowDmList()
     fun onShowTrackPanel()
     fun onSpeedChange()
+    /** 手动进入画中画 */
+    fun onEnterPiP()
     fun onShowEpisodeSelect()
     fun onTimeSync()
     fun onVideoProgress(duration: Int, position: Int)

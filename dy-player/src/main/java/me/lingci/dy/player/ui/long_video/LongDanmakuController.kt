@@ -163,6 +163,8 @@ class LongDanmakuController(
         release()
         dmTrackView.cleanData()
         dmSelectView.resetView()
+        // 重置偏移 UI 与全局 offsetPosition，避免上一集偏移残留
+        dmConfView.resetOffset()
     }
 
     /** 释放弹幕渲染资源。 */
@@ -213,6 +215,8 @@ class LongDanmakuController(
             )
             danmakuView.release()
             danmakuView.loadDanMu(file.path)
+            // 新文件 offset=0，重置偏移 UI，避免显示上一轨道的偏移
+            dmConfView.resetOffset()
             setDmList(file.path)
         }
     }
@@ -294,8 +298,20 @@ class LongDanmakuController(
             loadZipTrack(track)
         } else {
             danmakuView.loadDanMu(track.path)
+            // loadDanMu 会重置 offsetPosition=0，此处重新应用轨道持久化偏移
+            applyTrackOffset(track)
             setDmList(track.path)
         }
+    }
+
+    /**
+     * 加载轨道后，将该轨道的持久化偏移应用到全局 offsetPosition 与 DmConfControlView UI。
+     * loadDanMu 内部会把 offsetPosition 重置为 0，此处需要重新设置，确保切换轨道时
+     * 保留各轨道独立的偏移配置。
+     */
+    private fun applyTrackOffset(track: DmTrack) {
+        PlayerInitializer.Danmu.offsetPosition = track.offset
+        dmConfView.applyOffset(track.offset)
     }
 
     /** 异步读取 ZIP 内的 XML 弹幕，并把错误状态转换为用户可见提示。 */
@@ -321,6 +337,8 @@ class LongDanmakuController(
                             return@withContext
                         }
                         danmakuView.loadDanMu(ByteArrayInputStream(byteArray))
+                        // loadDanMu 会重置 offsetPosition=0，此处重新应用轨道持久化偏移
+                        applyTrackOffset(track)
                         applyList(dmList)
                     }
                 }
@@ -449,6 +467,8 @@ class LongDanmakuController(
                             try {
                                 danmakuView.release()
                                 danmakuView.loadDanMu(inputStream)
+                                // 合并时各 track.offset 已应用到弹幕时间属性，合并后偏移应为 0
+                                dmConfView.resetOffset()
                                 longVideoControlView.showTips("合并装载成功")
                             } catch (e: Exception) {
                                 FileOperator.writeText(

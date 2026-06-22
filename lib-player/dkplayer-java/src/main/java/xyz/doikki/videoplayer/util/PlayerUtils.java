@@ -15,10 +15,12 @@ import android.telephony.TelephonyManager;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Display;
+import android.view.DisplayCutout;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.ViewConfiguration;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 
 import androidx.annotation.NonNull;
@@ -162,13 +164,60 @@ public final class PlayerUtils {
 
     /**
      * 边缘检测
+     * 横屏全屏下需避开：系统返回手势区（约16dp）、刘海物理区域
+     * 修复机型兼容问题：原 40dp 阈值过大且 getScreenWidth(true) 横屏下重复计算导航栏宽度，
+     * 导致左右两侧亮度/音量调节区被误判为边缘而无法响应。
      */
     public static boolean isEdge(Context context, MotionEvent e) {
-        int edgeSize = dp2px(context, 40);
-        return e.getRawX() < edgeSize
-                || e.getRawX() > getScreenWidth(context, true) - edgeSize
-                || e.getRawY() < edgeSize
-                || e.getRawY() > getScreenHeight(context, true) - edgeSize;
+        // 系统返回手势区阈值（Android 10+ 约 16-24dp），保留 16dp 避让
+        int edgeSize = dp2px(context, 16);
+        float rawX = e.getRawX();
+        float rawY = e.getRawY();
+
+        // 使用真实物理屏幕尺寸，不再 + 导航栏高度
+        // （沉浸式下 widthPixels/heightPixels 已是全屏宽度，原 +navBarHeight 会重复计算）
+        int screenWidth = Resources.getSystem().getDisplayMetrics().widthPixels;
+        int screenHeight = Resources.getSystem().getDisplayMetrics().heightPixels;
+
+        // 基本四边边缘检测
+        if (rawX < edgeSize || rawX > screenWidth - edgeSize
+                || rawY < edgeSize || rawY > screenHeight - edgeSize) {
+            return true;
+        }
+
+        // 横屏下避让刘海区域（刘海在左右两侧，触摸可能被系统消费）
+        int cutoutEdge = getCutoutEdgeSize(context);
+        if (cutoutEdge > 0) {
+            if (rawX < cutoutEdge || rawX > screenWidth - cutoutEdge) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 获取横屏下刘海的边缘避让宽度（左右两侧）
+     * 仅在横屏且有刘海时返回非零值
+     */
+    private static int getCutoutEdgeSize(Context context) {
+        // 仅横屏需要避让左右刘海
+        if (Resources.getSystem().getConfiguration().orientation
+                != Configuration.ORIENTATION_LANDSCAPE) {
+            return 0;
+        }
+        Activity activity = scanForActivity(context);
+        if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return 0;
+        }
+        WindowInsets insets = activity.getWindow().getDecorView().getRootWindowInsets();
+        if (insets == null) return 0;
+        DisplayCutout cutout = insets.getDisplayCutout();
+        if (cutout == null) return 0;
+        // 刘海安全区域 inset，取左右最大值作为避让宽度
+        int left = cutout.getSafeInsetLeft();
+        int right = cutout.getSafeInsetRight();
+        return Math.max(left, right);
     }
 
 

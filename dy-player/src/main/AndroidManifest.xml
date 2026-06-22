@@ -92,6 +92,7 @@
             android:launchMode="singleTop"
             android:label="@string/title_long_video"
             android:autoRemoveFromRecents="false"
+            android:supportsPictureInPicture="true"
             android:exported="true"
             android:theme="@style/Theme.App.Translucent">
 
