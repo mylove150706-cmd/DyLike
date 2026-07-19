@@ -114,6 +114,8 @@
     <string name="hint_lab_surface_z_order_desc">尝试SurfaceView层级提升，排查部分机型无画面问题</string>
     <string name="hint_lab_mpv_special_render">MPV 专用 Render</string>
     <string name="hint_lab_mpv_special_render_desc">专用Render无闪屏，关闭后同步支持Texture</string>
+    <string name="hint_lab_mpv_sequential_read">MPV 顺序读优化</string>
+    <string name="hint_lab_mpv_sequential_read_desc">禁用 ffmpeg 对 MP4 的 demuxer-level 交错读取,缓解结构不良的远程视频拖动卡顿</string>
     <string name="hint_lab_long_video_portrait">长视频竖屏播放</string>
     <string name="hint_lab_long_video_portrait_desc">开启后长视频默认进入竖屏播放</string>
     <string name="hint_backup_data">备份数据</string>

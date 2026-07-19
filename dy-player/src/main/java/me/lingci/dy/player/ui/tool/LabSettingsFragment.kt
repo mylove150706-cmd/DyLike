@@ -50,6 +50,10 @@ class LabSettingsFragment : BaseFragment() {
         binding.swLabMpvSpecialRender.setOnClickListener {
             spUtil.labMpvSpecialRender = binding.swLabMpvSpecialRender.isChecked
         }
+        binding.swLabMpvSequentialRead.isChecked = spUtil.labMpvSequentialRead
+        binding.swLabMpvSequentialRead.setOnClickListener {
+            spUtil.labMpvSequentialRead = binding.swLabMpvSequentialRead.isChecked
+        }
         binding.swDebugMode.isChecked = spUtil.debugMode
         binding.swDebugMode.setOnClickListener {
             spUtil.debugMode = binding.swDebugMode.isChecked
