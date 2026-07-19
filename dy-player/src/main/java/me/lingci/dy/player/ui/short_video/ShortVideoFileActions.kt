@@ -161,6 +161,8 @@ class ShortVideoFileActions(
 
             withContext(Dispatchers.Main) {
                 if (success) {
+                    // oldPath 对 WebDav 是完整 URL（含 https:// 前缀），这里只替换末段文件名，
+                    // 前缀保持不变，确保 videoUrl 仍是完整 URL，下次操作仍能被 toRelativePath 正确处理。
                     val newPath = oldPath.substring(0, oldPath.lastIndexOf("/") + 1) + newName
                     videoData.name = newName
                     videoData.videoUrl = newPath
