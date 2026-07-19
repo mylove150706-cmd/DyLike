@@ -1140,10 +1140,50 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
                 mpv.command("set", "glsl-shaders", "")
                 L.d("Super-resolution: disabled")
             }
+            // 诊断：把 mpv 当前 shader + 渲染参数 dump 到文件（华为 logcat 屏蔽时的替代方案）
+            dumpSuperResDiagnostics()
             forceRerender()
+            // seek 后再 dump 一次，看 forceRerender 后是否真的重渲染了
+            Thread.sleep(500)
+            dumpSuperResDiagnostics()
         } catch (e: Exception) {
             L.e("setSuperResolutionEnabled failed: ${e.message}")
         }
+    }
+
+    /**
+     * 诊断：把 mpv 当前 shader + 渲染参数 dump 到 filesDir/super_res_diag.log。
+     * 用于排查 FSR 是否真的挂上、WHEN 条件是否触发。
+     */
+    private fun dumpSuperResDiagnostics() {
+        try {
+            val logFile = java.io.File(appContext.filesDir, "super_res_diag.log")
+            val sb = StringBuilder()
+            sb.append("=== ${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())} ===\n")
+            try {
+                sb.append("vo = ${mpv.getPropertyString("vo")}\n")
+                sb.append("hwdec = ${mpv.getPropertyString("hwdec")}\n")
+                sb.append("filename = ${mpv.getPropertyString("filename")}\n")
+                sb.append("width = ${mpv.getPropertyInt("width")}\n")
+                sb.append("height = ${mpv.getPropertyInt("height")}\n")
+                sb.append("dwidth = ${mpv.getPropertyInt("dwidth")}\n")
+                sb.append("dheight = ${mpv.getPropertyInt("dheight")}\n")
+                sb.append("video-params = ${mpv.getPropertyNode("video-params")}\n")
+                sb.append("video-out-params = ${mpv.getPropertyNode("video-out-params")}\n")
+                sb.append("glsl-shaders = ${mpv.getPropertyString("glsl-shaders")}\n")
+                sb.append("scale = ${mpv.getPropertyString("scale")}\n")
+                sb.append("cscale = ${mpv.getPropertyString("cscale")}\n")
+                sb.append("dscale = ${mpv.getPropertyString("dscale")}\n")
+                sb.append("android-surface-size = ${mpv.getPropertyString("android-surface-size")}\n")
+                sb.append("video-zoom = ${mpv.getPropertyDouble("video-zoom")}\n")
+                sb.append("video-unscaled = ${mpv.getPropertyString("video-unscaled")}\n")
+                sb.append("keepaspect = ${mpv.getPropertyString("keepaspect")}\n")
+                sb.append("panscan = ${mpv.getPropertyString("panscan")}\n")
+            } catch (e: Exception) {
+                sb.append("query failed: ${e.message}\n")
+            }
+            logFile.appendText(sb.toString())
+        } catch (_: Exception) {}
     }
 
     /**
@@ -1190,7 +1230,7 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
         } catch (_: Exception) {}
     }
 
-    private val superResolutionShaderNames = listOf("FSR.glsl")
+    private val superResolutionShaderNames = listOf("CAS.glsl")
 
     override fun setOptions() {
         if (isReleasing || isReleased || isNativeDestroyed) return
