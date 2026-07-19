@@ -1111,10 +1111,19 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
     private fun applySpikeAnime4KShaders() {
         if (isReleasing || isReleased || isNativeDestroyed) return
         try {
+            // [SPIKE v4] 最后一搏：换 vo=gpu-next（mpv 新一代 VO，对 user shader 支持完整）
+            // gpu-next 在这个 fork 上没验证过，风险：黑屏/崩溃
+            mpv.setOptionString("hwdec", "no")
+            mpv.setOptionString("vo", "gpu-next")
+            voInUse = "gpu-next"
+            L.d("[SPIKE] vo=gpu-next + hwdec=no for spike final validation")
+
             val shaderNames = listOf(
-                "Anime4K_Clamp_Highlights.glsl",
-                "Anime4K_Restore_CNN_VL.glsl",
-                "Anime4K_Upscale_CNN_x2_VL.glsl"
+                // [SPIKE v2] 换成对实拍也有效的 shader：
+                // FSRCNNX_x2_8-0-4-1：通用轻量放大器（实拍友好，不是动漫专用）
+                // adaptive-sharpen：通用边缘锐化
+                "FSRCNNX_x2_8-0-4-1.glsl",
+                "adaptive-sharpen.glsl"
             )
             val outDir = java.io.File(appContext.filesDir, "shaders")
             if (!outDir.exists()) outDir.mkdirs()
@@ -1137,8 +1146,125 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
                 mpv.command("change-list", "glsl-shaders", "add", path)
             }
             L.d("[SPIKE] Anime4K shaders applied (${paths.size} files)")
+            spikeShaderPaths = paths
         } catch (e: Exception) {
             L.e("[SPIKE] apply Anime4K shaders failed: ${e.message}")
+        }
+    }
+
+    // [SPIKE] 保存已加载的 shader 路径，供 toggle/dump 使用
+    private var spikeShaderPaths: List<String> = emptyList()
+
+    /**
+     * [SPIKE] 用 mpv 内置 screenshot-tofile 抓「shader 处理后」的当前帧。
+     * 必须用 scaled 模式（不能用 video）——Anime4K 输出会被 video 模式降回原分辨率。
+     * 仅在 spike 验证用。
+     */
+    fun spikeTakeScreenshot(outPath: String): Boolean {
+        val debugLog = java.io.File(appContext.filesDir, "shots/_debug.log")
+        fun dbg(msg: String) {
+            try {
+                debugLog.parentFile?.mkdirs()
+                debugLog.appendText("[${System.currentTimeMillis()}] $msg\n")
+            } catch (_: Exception) {}
+            L.d("[SPIKE] $msg")
+        }
+        dbg("spikeTakeScreenshot START outPath=$outPath isMpvInitialized=$isMpvInitialized isNativeDestroyed=$isNativeDestroyed")
+        if (!isMpvInitialized || isNativeDestroyed) {
+            dbg("RETURN false: not initialized")
+            return false
+        }
+        // 先报告 mpv 当前状态（不依赖 screenshot，纯粹查属性）
+        try {
+            val glslShaders = mpv.getPropertyString("glsl-shaders")
+            val vo = mpv.getPropertyString("vo")
+            val filename = mpv.getPropertyString("filename")
+            val width = mpv.getPropertyInt("width")
+            val height = mpv.getPropertyInt("height")
+            val dwidth = mpv.getPropertyInt("dwidth")
+            val dheight = mpv.getPropertyInt("dheight")
+            val paused = mpv.getPropertyBoolean("pause")
+            val coreIdle = mpv.getPropertyBoolean("core-idle")
+            // video-params 包含真实渲染参数：rotate/w/h（解码）、par（像素比）、...
+            val videoParams = mpv.getPropertyNode("video-params")
+            val videoOutParams = mpv.getPropertyNode("video-out-params")
+            val scale = mpv.getPropertyString("scale")
+            val cscale = mpv.getPropertyString("cscale")
+            val dscale = mpv.getPropertyString("dscale")
+            dbg("STATUS vo=$vo filename=$filename")
+            dbg("STATUS video ${width}x${height} display ${dwidth}x${dheight}")
+            dbg("STATUS pause=$paused core-idle=$coreIdle")
+            dbg("STATUS scale=$scale cscale=$cscale dscale=$dscale")
+            dbg("STATUS video-params=$videoParams")
+            dbg("STATUS video-out-params=$videoOutParams")
+            dbg("STATUS glsl-shaders=$glslShaders")
+            dbg("STATUS spikeShaderPaths=$spikeShaderPaths")
+        } catch (e: Exception) {
+            dbg("STATUS query failed: ${e.message}")
+        }
+        return try {
+            val shotsDir = java.io.File(outPath).parentFile
+            if (shotsDir != null && !shotsDir.exists()) shotsDir.mkdirs()
+            dbg("shotsDir=${shotsDir?.absolutePath} exists=${shotsDir?.exists()}")
+            // 关键：dump 前强制 seek 当前位置，确保 mpv 用「最新 shader 配置」重渲染当前帧
+            spikeForceRerender()
+            Thread.sleep(500)
+            dbg("calling mpv.command(screenshot-tofile, outPath, scaled)")
+            val result = mpv.commandNode("screenshot-to-file", outPath, "scaled")
+            dbg("commandNode returned: $result")
+            Thread.sleep(1500)
+            val outFile = java.io.File(outPath)
+            dbg("outFile exists=${outFile.exists()} size=${if (outFile.exists()) outFile.length() else 0}")
+            outFile.exists() && outFile.length() > 0
+        } catch (e: Exception) {
+            dbg("EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * [SPIKE] 清空所有 user shader（保留 mpv 内置 scaler）。
+     * 切换后强制 seek 当前位置触发重渲染（pause 状态下 shader 切换不会自动重绘）。
+     */
+    fun spikeClearShaders() {
+        if (!isMpvInitialized || isNativeDestroyed) return
+        try {
+            mpv.command("set", "glsl-shaders", "")
+            spikeForceRerender()
+            L.d("[SPIKE] shaders cleared")
+        } catch (e: Exception) {
+            L.e("[SPIKE] clear shaders failed: ${e.message}")
+        }
+    }
+
+    /**
+     * [SPIKE] 通过 seek 到当前位置强制 mpv 重渲染当前帧。
+     * 在 pause 状态下，单纯改 shader 不会触发重绘——必须 seek。
+     */
+    private fun spikeForceRerender() {
+        try {
+            val pos = mpv.getPropertyDouble("time-pos") ?: return
+            mpv.command("seek", pos.toString(), "absolute", "exact")
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * [SPIKE] 重新加载 spike 的 Anime4K shader。
+     */
+    fun spikeReloadShaders() {
+        if (!isMpvInitialized || isNativeDestroyed) return
+        if (spikeShaderPaths.isEmpty()) {
+            applySpikeAnime4KShaders()
+            return
+        }
+        try {
+            for (path in spikeShaderPaths) {
+                mpv.command("change-list", "glsl-shaders", "add", path)
+            }
+            spikeForceRerender()
+            L.d("[SPIKE] shaders reloaded (${spikeShaderPaths.size})")
+        } catch (e: Exception) {
+            L.e("[SPIKE] reload shaders failed: ${e.message}")
         }
     }
 

@@ -45,6 +45,7 @@ import me.lingci.lib.base.util.Log
 import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.player.danmaku.PlayerInitializer
+import me.lingci.lib.player.mpv.MpvMediaPlayer
 import me.lingci.lib.player.exo.CustomExoMediaPlayer
 import me.lingci.lib.player.listener.OnFontChangeListener
 import me.lingci.lib.player.listener.OnLongVideoListener
@@ -91,6 +92,11 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         private const val KEY_HISTORY = "history"
         private const val KEY_TEMP = "temp"
         private const val BACKGROUND_RECOVERY_WINDOW_MS = 5000L
+
+        // [SPIKE] 超分验证用广播 action（adb 触发同帧 dump + shader 切换）
+        const val ACTION_SPIKE_DUMP = "me.lingci.dy.player.spike.DUMP"
+        const val ACTION_SPIKE_SHADER_OFF = "me.lingci.dy.player.spike.SHADER_OFF"
+        const val ACTION_SPIKE_SHADER_ON = "me.lingci.dy.player.spike.SHADER_ON"
 
         fun start(context: Context, list: ArrayList<VideoData>, index: Int, history: Boolean) {
             val bundle = bundleOf()
@@ -207,6 +213,44 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
+
+    // [SPIKE] 超分验证广播接收器：通过 adb 发广播触发同帧 dump + shader 切换，供 SSIM 对比。
+    // 验证通过后整块移除。
+    private val spikeShaderReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val mpv = videoView.getCurrentPlayer() as? MpvMediaPlayer ?: return
+            when (intent.action) {
+                ACTION_SPIKE_DUMP -> {
+                    // extra "name" 决定输出文件名：frame_with_shader.png / frame_baseline.png
+                    val name = intent.getStringExtra("name") ?: "frame"
+                    val outPath = java.io.File(filesDir, "shots/$name.png").absolutePath
+                    val ok = mpv.spikeTakeScreenshot(outPath)
+                    android.widget.Toast.makeText(
+                        this@LongVideoActivity,
+                        if (ok) "[SPIKE] dump -> $name.png" else "[SPIKE] dump failed (no player?)",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                ACTION_SPIKE_SHADER_OFF -> {
+                    mpv.spikeClearShaders()
+                    android.widget.Toast.makeText(
+                        this@LongVideoActivity,
+                        "[SPIKE] shaders OFF",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                ACTION_SPIKE_SHADER_ON -> {
+                    mpv.spikeReloadShaders()
+                    android.widget.Toast.makeText(
+                        this@LongVideoActivity,
+                        "[SPIKE] shaders ON",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+    }
+    private var isSpikeReceiverRegistered = false
 
     private fun getPlayerCapabilities(): PlayerCapabilities {
         return videoView.getPlayerCapability(PlayerCapabilityProvider::class.java)
@@ -864,6 +908,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                 }
             }
         }
+        // [SPIKE] 注册超分验证广播接收器（让 adb 能触发 dump / shader 切换）
+        registerSpikeShaderReceiver()
     }
 
     override fun onPause() {
@@ -887,6 +933,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         super.onDestroy()
         // 注销 PiP 广播接收器，避免内存泄漏
         unregisterPipActionReceiver()
+        // [SPIKE] 注销超分验证广播接收器
+        unregisterSpikeShaderReceiver()
         mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
@@ -1297,6 +1345,29 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         if (isPipReceiverRegistered) {
             unregisterReceiver(pipActionReceiver)
             isPipReceiverRegistered = false
+        }
+    }
+
+    // [SPIKE] 超分验证用：注册广播接收器（exported，让 adb 能发）。
+    private fun registerSpikeShaderReceiver() {
+        if (isSpikeReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(ACTION_SPIKE_DUMP)
+            addAction(ACTION_SPIKE_SHADER_OFF)
+            addAction(ACTION_SPIKE_SHADER_ON)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(spikeShaderReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(spikeShaderReceiver, filter)
+        }
+        isSpikeReceiverRegistered = true
+    }
+
+    private fun unregisterSpikeShaderReceiver() {
+        if (isSpikeReceiverRegistered) {
+            unregisterReceiver(spikeShaderReceiver)
+            isSpikeReceiverRegistered = false
         }
     }
 

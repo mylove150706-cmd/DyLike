@@ -142,6 +142,56 @@ class ShortVideoActivity : BaseActivity() {
     private val shortCommentDialog by lazy { ShortCommentDialog() }
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
+
+    // [SPIKE] 超分验证广播接收器（同 LongVideoActivity，让短视频也能触发 dump + shader 切换）
+    private val spikeShaderReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val mpv = mVideoView.getCurrentPlayer() as? me.lingci.lib.player.mpv.MpvMediaPlayer ?: return
+            when (intent.action) {
+                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_DUMP -> {
+                    val name = intent.getStringExtra("name") ?: "frame"
+                    val outPath = File(filesDir, "shots/$name.png").absolutePath
+                    val ok = mpv.spikeTakeScreenshot(outPath)
+                    android.widget.Toast.makeText(
+                        this@ShortVideoActivity,
+                        if (ok) "[SPIKE] dump -> $name.png" else "[SPIKE] dump failed",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_OFF -> {
+                    mpv.spikeClearShaders()
+                    android.widget.Toast.makeText(this@ShortVideoActivity, "[SPIKE] shaders OFF", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_ON -> {
+                    mpv.spikeReloadShaders()
+                    android.widget.Toast.makeText(this@ShortVideoActivity, "[SPIKE] shaders ON", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+    private var isSpikeReceiverRegistered = false
+
+    private fun registerSpikeShaderReceiver() {
+        if (isSpikeReceiverRegistered) return
+        val filter = android.content.IntentFilter().apply {
+            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_DUMP)
+            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_OFF)
+            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_ON)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(spikeShaderReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(spikeShaderReceiver, filter)
+        }
+        isSpikeReceiverRegistered = true
+    }
+
+    private fun unregisterSpikeShaderReceiver() {
+        if (isSpikeReceiverRegistered) {
+            unregisterReceiver(spikeShaderReceiver)
+            isSpikeReceiverRegistered = false
+        }
+    }
     private val isUserScroll = AtomicBoolean(false)
     private val playbackLogCache = PlaybackLogCache()
     private val mediaPlaybackRecorder by lazy { MediaPlaybackRecorder(spUtil) }
