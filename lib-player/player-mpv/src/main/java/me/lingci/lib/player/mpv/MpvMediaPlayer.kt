@@ -1113,17 +1113,15 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
         try {
             // [SPIKE v8] 验证已完成：LUMA/CHROMA hook 在 Android mpv 上生效（染色 shader 画面变黄）。
             // 但 RGB/POSTKERNEL hook 不生效（adaptive-sharpen 没跑）。
-            // 现在临时禁用染色 shader，避免影响正常播放。
+            // 当前临时禁用所有 spike shader，避免影响正常播放。
+            // 若要重新验证：把下面 shaderNames 改成 listOf("spike_red_tint.glsl") 即可。
             // 详见 docs/superpowers/specs/2026-07-20-mpv-shader-super-resolution-spike.md
-            L.d("[SPIKE] shader pipeline verified (v8): LUMA/CHROMA hooks fire, POSTKERNEL does not. Skipping shader load.")
-            spikeShaderPaths = emptyList()
-            return
-        }
-        @Suppress("UNREACHABLE_CODE")
-        run {
-            val shaderNames = listOf(
-                "spike_red_tint.glsl"
-            )
+            val shaderNames = emptyList<String>()
+            if (shaderNames.isEmpty()) {
+                L.d("[SPIKE] shader pipeline verified (v8): LUMA/CHROMA hooks fire, POSTKERNEL does not. Skipping shader load.")
+                spikeShaderPaths = emptyList()
+                return
+            }
             val outDir = java.io.File(appContext.filesDir, "shaders")
             if (!outDir.exists()) outDir.mkdirs()
             val paths = ArrayList<String>()
