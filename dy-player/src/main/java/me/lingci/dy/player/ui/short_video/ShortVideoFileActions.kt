@@ -187,7 +187,7 @@ class ShortVideoFileActions(
             val success = try {
                 val storage = resolveStorage(videoData)
                 if (storage != null) {
-                    storage.delete(path)
+                    storage.delete(storage.toRelativePath(path))
                 } else {
                     val file = File(path)
                     if (file.exists()) file.delete() else true
