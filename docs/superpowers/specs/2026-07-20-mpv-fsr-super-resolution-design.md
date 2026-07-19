@@ -66,20 +66,24 @@ mpv 的渲染目标由 `android-surface-size` 决定，默认等于 SurfaceView 
 
 ### Shader 列表
 
-| Shader | Hook | 来源 | 作用 |
-|---|---|---|---|
-| `FSR_EASU.glsl` | LUMA | [agyild FSR gist](https://gist.github.com/agyild/82219c545228d70c5604f865ce0b0ce5) v1.0.2 | 边缘自适应升采样，FSR 核心 |
-| `FSR_RCAS.glsl` | LUMA | 同上 | RCAS 锐化（EASU 输出后做对比度自适应锐化） |
+**单个文件 `FSR.glsl`**，包含两个 LUMA hook：
+
+| Hook | 作用 | 行号 |
+|---|---|---|
+| LUMA hook #1（EASU） | 边缘自适应升采样，FSR 核心；把 LUMA plane 放大并 SAVE 到 EASUTEX | line 34 |
+| LUMA hook #2（RCAS） | 对比度自适应锐化；读 EASUTEX 输出最终结果 | line 363 |
+
+来源：[agyild FSR gist](https://gist.github.com/agyild/82219c545228d70c5604f865ce0b0ce5) v1.0.2（AMD FSR 1.0.2 的 mpv 端口，单文件版本）。
 
 ### 关键约束
 
-来自 spike 验证：**必须挂 LUMA hook**（POSTKERNEL/RGB 在本 AAR 上不触发）。FSR EASU/RCAS 的官方 mpv 端口本来就是 LUMA hook，无需修改。
+来自 spike 验证：**必须挂 LUMA hook**（POSTKERNEL/RGB 在本 AAR 上不触发）。`FSR.glsl` 两个 pass 都是 LUMA hook，无需修改。
 
 ### 存放与加载
 
-- **存放**：`lib-player/player-mpv/src/main/assets/shaders/FSR_EASU.glsl`、`FSR_RCAS.glsl`
-- **运行时拷贝**：与现有 spike 同路径 `filesDir/shaders/`（复用现有拷贝机制）
-- **加载命令**：`mpv.command("change-list", "glsl-shaders", "add", path)`（已验证有效）
+- **存放**：`lib-player/player-mpv/src/main/assets/shaders/FSR.glsl`（单文件）
+- **运行时拷贝**：`filesDir/shaders/FSR.glsl`（复用现有拷贝机制）
+- **加载命令**：`mpv.command("change-list", "glsl-shaders", "add", path)`（已验证有效，单文件一次 add，mpv 内部会自动展开两个 hook）
 - **清空命令**：`mpv.command("set", "glsl-shaders", "")`
 
 ### 清理 spike 残留
@@ -105,7 +109,7 @@ companion object {
     private const val SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT = false
 }
 
-private val superResolutionShaderNames = listOf("FSR_EASU.glsl", "FSR_RCAS.glsl")
+private val superResolutionShaderNames = listOf("FSR.glsl")
 
 /**
  * 画质增强开关。开启时挂 EASU+RCAS 到 LUMA hook，关闭时清空。
@@ -274,8 +278,7 @@ adb shell am broadcast -f 0x10 -a me.lingci.dy.player.SUPER_RES_OFF
 
 | 文件 | 改动类型 | 说明 |
 |---|---|---|
-| `lib-player/player-mpv/src/main/assets/shaders/FSR_EASU.glsl` | 新增 | 从 gist 拷贝 |
-| `lib-player/player-mpv/src/main/assets/shaders/FSR_RCAS.glsl` | 新增 | 从 gist 拷贝 |
+| `lib-player/player-mpv/src/main/assets/shaders/FSR.glsl` | 新增 | 从 gist 拷贝（单文件含 EASU+RCAS 两个 LUMA hook） |
 | `lib-player/player-mpv/src/main/assets/shaders/spike_red_tint.glsl` | 删除 | spike 残留 |
 | `lib-player/player-mpv/src/main/assets/shaders/Anime4K_*.glsl` (3 个) | 删除 | spike 残留 |
 | `lib-player/player-mpv/src/main/assets/shaders/FSRCNNX_*.glsl` | 删除 | spike 残留 |
