@@ -172,6 +172,15 @@ open class SpUtil(context: Context) : SpBase(context) {
 
     var labMpvSpecialRender by SPManager.boolean(true)
 
+    /**
+     * MPV 顺序读优化（禁用 ffmpeg mov demuxer 的 interleaved_read，避免 badly-interleaved
+     * MP4 over HTTP 触发 seek 风暴，缓解拖动进度条卡顿）。
+     *
+     * ⚠️ 跨模块约定：此 key 由 lib-player/player-mpv/MpvMediaPlayer 在 init 时直接读取
+     * （app 默认 SharedPreferences）。重命名属性会破坏 MPV 端读取。
+     */
+    var labMpvSequentialRead by SPManager.boolean(true)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 
