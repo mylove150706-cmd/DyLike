@@ -219,4 +219,23 @@ class ShortVideoFileActions(
         }
         return source?.toStorage()
     }
+
+    /**
+     * 将 videoData.videoUrl 转成 storage.delete/rename 期望的相对路径。
+     *
+     * 背景：WebDav 的 videoUrl 是完整 URL（如 https://dav.example.com/dav/movies/a.mp4），
+     * 但 WebDavStorage.delete/rename 内部又会拼一次 rootUrl，必须先剥离掉前缀。
+     * - WebDav：fullPath("") 返回 rootUrl，命中 startsWith → 剥离得到 "/movies/a.mp4"。
+     * - 本地：LocalStorage.fullPath("") 返回 ""，root 为空 → 原样返回。
+     *
+     * 同时幂等：传入已经是相对路径的字符串也能正确处理（startsWith 不命中 → 原样返回）。
+     */
+    private fun IStorage.toRelativePath(fullUrl: String): String {
+        val root = fullPath("")
+        return if (root.isNotEmpty() && fullUrl.startsWith(root)) {
+            fullUrl.removePrefix(root)
+        } else {
+            fullUrl
+        }
+    }
 }
