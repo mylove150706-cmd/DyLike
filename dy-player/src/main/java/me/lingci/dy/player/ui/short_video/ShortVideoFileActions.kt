@@ -140,7 +140,7 @@ class ShortVideoFileActions(
             val success = try {
                 val storage = resolveStorage(videoData)
                 if (storage != null) {
-                    storage.rename(oldPath, newName)
+                    storage.rename(storage.toRelativePath(oldPath), newName)
                 } else {
                     val oldFile = File(oldPath)
                     if (oldFile.exists()) {
