@@ -1,92 +1,94 @@
 # Spike 报告：MPV GLSL 着色器超分在 DyLike 的可行性
 
-**日期**：2026-07-20
+**日期**：2026-07-20（初版）/ 2026-07-19（v2 更新）
 **分支**：`spike/super-resolution-anime4k`
-**状态**：✅ 验证完成 — 结论为「不可行」
+**状态**：🔄 **结论推翻——超分功能可行**
 **目的**：验证用户提议的「开启开关后对低分辨率视频超分到 1080p/2K/4K」功能，是否能在当前 MPV Android 集成下用 GLSL user shader 实现。
 
-## 背景
+## ⚠️ 重大更正
 
-用户希望添加一个开关：开启后可对低分辨率视频进行超分，并提供 1080p/2K/4K 目标分辨率选项。
+**初版结论「不可行」是错的。** 通过染色 shader（spike_red_tint.glsl）验证后确认：user shader hook 链路在 abdallahmehiz/mpv-android-lib:0.1.12 的 Android 集成下**是通的**，超分功能可行。
 
-经过初轮技术评估，唯一能「实时边播边增强」的方案是 MPV 的 GLSL user shader（Anime4K / FSRCNNX / adaptive-sharpen 等）。本 spike 用于在投入产品功能开发之前，先验证这条路线是否真的能跑通并产生肉眼可见的效果。
+初版误判的根本原因有两个：
 
-## Spike 设计
+1. **误读 mpv `dwidth/dheight` 属性的语义**
+   - 初版以为 `video-out-params/dw=403 dh=720` 表示 mpv 渲染目标尺寸 = 视频原始尺寸
+   - 实际上：`dwidth/dheight` 来自 `command.c:4712` 的 `M_PROPERTY_ALIAS("dwidth", "video-out-params/dw")`，它表示「视频应该按多大显示」（与像素比相关），**与 VO 实际 framebuffer 尺寸无关**
+   - mpv 上游 `video/out/opengl/context_android.c:104-122` 的 `android_reconfig()` 会把 VO 实际渲染分辨率（`vo->dwidth/dheight`）设为 `android-surface-size`（即 SurfaceView 物理像素 1256×2672），shader 是在这个尺寸的 FBO 上跑的
 
-在 `MpvMediaPlayer.initialize()` 中：
-- 从 assets 拷贝 GLSL shader 到 `filesDir/shaders/`
-- 用 `mpv.command("change-list", "glsl-shaders", "add", path)` 加载到 mpv
-- 通过 adb broadcast 触发同帧 dump（`screenshot-to-file` 命令的 `scaled` 模式）
-- 开/关 shader 各 dump 一帧，Python 算 SSIM + 锐度差
+2. **shader 选择 + hook 点选择都不适合实拍内容**
+   - Anime4K 是动漫专用（只对硬边线条/色块起作用），测实拍画面 SSIM≈1.00 是预期的
+   - adaptive-sharpen 挂的是 `POSTKERNEL` hook，**而 POSTKERNEL hook 在本 AAR 的 Android 集成下根本不触发**（染色 shader 实测确认）
+   - FSRCNNX 挂 LUMA hook 是会生效的，但对实拍内容的提升本来就微弱
 
-## 四次量化测试结果
+## 染色 shader 验证（决定性证据）
 
-测试素材：实拍视频，402×720，硬编码字幕。暂停在细节较多的画面。
+为了判断 user shader hook 链路是否真的在 Android mpv 上跑，写了 `spike_red_tint.glsl`，包含三个 hook：
 
-| # | Shader | vo | hwdec | SSIM | 平均像素差 (/255) | 差异像素占比 | 锐度提升 | 文件大小 |
-|---|---|---|---|---|---|---|---|---|
-| 1 | Anime4K Mode A (3 shaders) | gpu | auto | 0.9917 | 0.58 | 2.0% | 1.01x | 1.06→1.07 MB |
-| 2 | FSRCNNX + adaptive-sharpen | gpu | auto | 0.9972 | 0.25 | 0.3% | 1.01x | 1.06→1.02 MB |
-| 3 | FSRCNNX + adaptive-sharpen | gpu | no | 0.9971 | 0.26 | 0.3% | 1.01x | 1.00→1.00 MB |
-| 4 | FSRCNNX + adaptive-sharpen | gpu-next | no | 0.9985 | 0.13 | 0.0% | 1.00x | 6.7→6.4 MB |
+```glsl
+//!HOOK LUMA       // 把亮度 Y 强制设为 1.0
+//!HOOK CHROMA     // 把 Cb 设为 0
+//!HOOK RGB        // 返回纯红 vec4(1,0,0,c.a)
+```
 
-**判定阈值**：SSIM < 0.95 或锐度提升 > 1.2x 视为「shader 有效」。
-**实际结果**：四次全部 SSIM > 0.99，锐度提升 ≤ 1.01x，**全部判定为无效**。
+**实测结果**：画面变成**纯黄色** `(R=1, G=1, B=0)`。
 
-## 证据链
+按 BT.601 YUV→RGB 反推：
+- Y=1.0, Cb=0, Cr≈0.5（原值，接近中性）
+- R = 1.0 + 1.402·0 = 1.0
+- G = 1.0 − 0.344·(−0.5) − 0.714·0 = 1.172 → clip 到 1.0
+- B = 1.0 + 1.772·(−0.5) = 0.114 → ≈ 0
+- = (1, 1, 0) = **纯黄** ✅ 完全吻合
 
-证明「shader 加载了但没生效」的硬证据：
+### 三个 hook 点的有效性
 
-1. ✅ **shader 文件正确拷贝到 filesDir**（大小匹配原始文件 2795/144075/146743/71296/10446 字节）
-2. ✅ **mpv `glsl-shaders` 属性正确报告加载列表**（包含所有 shader 绝对路径）
-3. ✅ **mpv `gpu-shader-cache-dir` 下生成了 shader 编译缓存文件**（每个 ~7-11KB，是 GLSL 编译后的 GPU 二进制）
-4. ❌ **mpv `video-out-params` 显示输出尺寸 = 视频原始尺寸**（402×720，从未变化）—— mpv 没做任何放大
-5. ❌ **SSIM ≈ 1.00，开/关 shader 的画面几乎完全相同**
+| Hook | 染色 shader 是否生效 | 含义 |
+|---|---|---|
+| **LUMA** | ✅ **生效**（Y 通道被改了） | 超分主战场——FSRCNNX、Anime4K Upscale_CNN 都挂这里 |
+| **CHROMA** | ✅ **生效**（Cb 被改了） | 色度升采样（KrigBilateral）会生效 |
+| **POSTKERNEL / RGB** | ❌ **不生效**（RGB 阶段 hook 没跑） | adaptive-sharpen 等后处理必须改挂到 LUMA |
 
-第 4 点尤其关键：`dw=403, dh=720`（视频原始尺寸）从未变成屏幕尺寸（1256×2672）。这说明 mpv 的渲染目标就是视频原尺寸，user shader 即便被加载、被编译，也没有在渲染管线中被实际调用。
+## 之前 4 次 SSIM 测试的真实含义
+
+初版 4 次测试都用 `vo=gpu` + 各种 shader 组合，SSIM 都 ≈ 1.00。现在重读：
+
+| # | Shader 组合 | 真相 |
+|---|---|---|
+| 1 | Anime4K Mode A（3 shaders） | Anime4K 对实拍本来就几乎 passthrough，SSIM≈1.00 预期 |
+| 2 | FSRCNNX + adaptive-sharpen | FSRCNNX 对实拍微弱 + adaptive-sharpen POSTKERNEL 没跑 → 几乎无变化 |
+| 3 | FSRCNNX + adaptive-sharpen + hwdec=no | hwdec 不影响 shader 执行，结果同 #2 |
+| 4 | FSRCNNX + adaptive-sharpen + vo=gpu-next | 同 #2，且 vo=gpu-next 可能改变 hook 语义但没改变根本问题 |
+
+**关键**：4 次测试都包含 adaptive-sharpen（POSTKERNEL），它根本没生效。FSRCNNX（LUMA）应该是生效的，但对实拍提升微小，被 SSIM 淹没。
 
 ## 结论
 
-**用户提议的「shader 实时超分」功能在当前 mpv Android 集成（abdallahmehiz/mpv-android-lib:0.1.12）下无法实现。**
+**用户提议的「shader 实时超分」功能在当前 mpv Android 集成下可以实现，但需要：**
 
-不是 shader 选择问题，不是参数配置问题，而是 mpv 在 Android Surface 渲染时根本绕过了 user shader hook 链路。`glsl-shaders` 属性可以加载、shader 可以编译、属性报告成功，但 GPU 渲染时不调用它们。
-
-覆盖的变量：
-- shader 类型：Anime4K（动漫专用） / FSRCNNX + adaptive-sharpen（实拍友好）
-- VO：`gpu`（默认）/ `gpu-next`（新一代）
-- hwdec：`auto`（硬解）/ `no`（软解）
-
-所有 8 种理论组合中验证了 4 种最有代表性的组合，全部无效。
-
-## 后续可探索方向（不在本 spike 范围内）
-
-如果未来仍想实现真超分，可考虑：
-
-1. **离线神经超分**（Real-ESRGAN ncnn）：对文件做一次性预处理生成增强版，再播放。真 4K，但每个视频要等几分钟~几小时、占大量存储、不能边下边播。工作量大。
-2. **更换 mpv 集成**：尝试其他 mpv Android 封装（如原版 mpv-android），看 user shader 是否能正常工作。需要评估迁移成本。
-3. **不实现超分**：接受当前 mpv 内置 scaler（bilinear）的画质。
+1. **shader 选择必须对实拍内容有效**：FSRCNNX 太弱，应该换 FSR（FidelityFX Super Resolution）、CAS（Contrast Adaptive Sharpening）或 NNEDI3 等对自然图像提升明显的
+2. **后处理必须挂 LUMA，不能挂 POSTKERNEL**：POSTKERNEL hook 在本 AAR 上不触发
+3. **超分强度可能比桌面 mpv 弱**：因为 Android 上 hwdec=auto 会跳过部分 CPU 处理路径，shader 输入可能是已经硬件解码的低质量像素
 
 ## 可复现的代码位置
 
 - Spike 代码：`spike/super-resolution-anime4k` 分支
+- 染色 shader：`lib-player/player-mpv/src/main/assets/shaders/spike_red_tint.glsl`
 - 关键文件：
-  - `lib-player/player-mpv/src/main/java/me/lingci/lib/player/mpv/MpvMediaPlayer.kt`（spike 注入点）
-  - `lib-player/player-mpv/src/main/assets/shaders/`（5 个 shader 文件）
+  - `lib-player/player-mpv/src/main/java/me/lingci/lib/player/mpv/MpvMediaPlayer.kt`（spike 注入点：`applySpikeAnime4KShaders()`）
   - `dy-player/.../ui/long_video/LongVideoActivity.kt`（spike broadcast receiver）
   - `dy-player/.../ui/short_video/ShortVideoActivity.kt`（spike broadcast receiver 副本）
-  - `spike_compare.py`（SSIM 对比脚本）
 
-## 复现步骤
+## 复现步骤（验证 hook 链路）
 
 ```bash
 # 1. 切到 spike 分支
 git checkout spike/super-resolution-anime4k
 
-# 2. 构建 + 安装到真机
+# 2. 把染色 shader 重新挂上（修改 applySpikeAnime4KShaders 加载 spike_red_tint.glsl）
+
+# 3. 构建 + 安装
 ./gradlew :dy-player:installBetaDebug
 
-# 3. 手机上播放任意视频（建议实拍 480p/720p），暂停在一帧
-
-# 4. 在 PC 上运行对比脚本（保持手机视频暂停在前台）
-py spike_compare.py
+# 4. 手机播放任意视频
+# 5. 观察画面：应该变成纯黄色，证明 LUMA/CHROMA hook 生效
 ```

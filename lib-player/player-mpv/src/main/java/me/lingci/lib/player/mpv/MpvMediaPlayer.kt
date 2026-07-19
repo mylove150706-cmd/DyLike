@@ -1111,19 +1111,18 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
     private fun applySpikeAnime4KShaders() {
         if (isReleasing || isReleased || isNativeDestroyed) return
         try {
-            // [SPIKE v4] 最后一搏：换 vo=gpu-next（mpv 新一代 VO，对 user shader 支持完整）
-            // gpu-next 在这个 fork 上没验证过，风险：黑屏/崩溃
-            mpv.setOptionString("hwdec", "no")
-            mpv.setOptionString("vo", "gpu-next")
-            voInUse = "gpu-next"
-            L.d("[SPIKE] vo=gpu-next + hwdec=no for spike final validation")
-
+            // [SPIKE v8] 验证已完成：LUMA/CHROMA hook 在 Android mpv 上生效（染色 shader 画面变黄）。
+            // 但 RGB/POSTKERNEL hook 不生效（adaptive-sharpen 没跑）。
+            // 现在临时禁用染色 shader，避免影响正常播放。
+            // 详见 docs/superpowers/specs/2026-07-20-mpv-shader-super-resolution-spike.md
+            L.d("[SPIKE] shader pipeline verified (v8): LUMA/CHROMA hooks fire, POSTKERNEL does not. Skipping shader load.")
+            spikeShaderPaths = emptyList()
+            return
+        }
+        @Suppress("UNREACHABLE_CODE")
+        run {
             val shaderNames = listOf(
-                // [SPIKE v2] 换成对实拍也有效的 shader：
-                // FSRCNNX_x2_8-0-4-1：通用轻量放大器（实拍友好，不是动漫专用）
-                // adaptive-sharpen：通用边缘锐化
-                "FSRCNNX_x2_8-0-4-1.glsl",
-                "adaptive-sharpen.glsl"
+                "spike_red_tint.glsl"
             )
             val outDir = java.io.File(appContext.filesDir, "shaders")
             if (!outDir.exists()) outDir.mkdirs()
