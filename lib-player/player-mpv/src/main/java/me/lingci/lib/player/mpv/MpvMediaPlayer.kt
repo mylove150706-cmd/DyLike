@@ -651,6 +651,13 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
             // 设置运行时选项（在mpv.init()之后）
             setRuntimeOptions()
 
+            // [SPIKE] 验证：仅加日志，确认编译通过
+            L.d("[SPIKE] runtime options set, ready for shader injection")
+
+            if (!isMpvInitialized) {
+                applySpikeAnime4KShaders()
+            }
+
             /* set hardcoded options */
             mpv.setOptionString("force-window", "no")
             // Keep the embedded player alive after EOF so replay can reuse the instance.
@@ -1099,6 +1106,40 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
         
         // HDR/色彩空间配置
         setHdrMode(hdrMode)
+    }
+
+    private fun applySpikeAnime4KShaders() {
+        if (isReleasing || isReleased || isNativeDestroyed) return
+        try {
+            val shaderNames = listOf(
+                "Anime4K_Clamp_Highlights.glsl",
+                "Anime4K_Restore_CNN_VL.glsl",
+                "Anime4K_Upscale_CNN_x2_VL.glsl"
+            )
+            val outDir = java.io.File(appContext.filesDir, "shaders")
+            if (!outDir.exists()) outDir.mkdirs()
+            val paths = ArrayList<String>()
+            for (name in shaderNames) {
+                val out = java.io.File(outDir, name)
+                if (!out.exists() || out.length() == 0L) {
+                    val inp = appContext.assets.open("shaders/$name")
+                    val fos = java.io.FileOutputStream(out)
+                    inp.use { i -> fos.use { o -> i.copyTo(o) } }
+                }
+                if (out.exists() && out.length() > 0L) paths.add(out.absolutePath)
+            }
+            if (paths.isEmpty()) {
+                L.e("[SPIKE] no shader files available, skip")
+                return
+            }
+            L.d("[SPIKE] applying Anime4K shaders: $paths")
+            for (path in paths) {
+                mpv.command("change-list", "glsl-shaders", "add", path)
+            }
+            L.d("[SPIKE] Anime4K shaders applied (${paths.size} files)")
+        } catch (e: Exception) {
+            L.e("[SPIKE] apply Anime4K shaders failed: ${e.message}")
+        }
     }
 
     override fun setOptions() {
