@@ -1,11 +1,14 @@
 package me.lingci.dy.player.ui.tool
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Toast
 import me.lingci.dy.player.databinding.FragmentLabSettingBinding
+import me.lingci.dy.player.ui.long_video.LongVideoActivity
 import me.lingci.dy.player.util.SpUtil
 import me.lingci.lib.base.ui.BaseFragment
 
@@ -53,6 +56,20 @@ class LabSettingsFragment : BaseFragment() {
         binding.swLabMpvSequentialRead.isChecked = spUtil.labMpvSequentialRead
         binding.swLabMpvSequentialRead.setOnClickListener {
             spUtil.labMpvSequentialRead = binding.swLabMpvSequentialRead.isChecked
+        }
+        binding.swLabMpvSuperResolution.isChecked = spUtil.labMpvSuperResolution
+        binding.swLabMpvSuperResolution.setOnClickListener {
+            val on = binding.swLabMpvSuperResolution.isChecked
+            spUtil.labMpvSuperResolution = on
+            // 立即对当前 MPV 实例生效（若不在 MPV 内核则忽略，下次切到 MPV 时由 init 应用）
+            val action = if (on) LongVideoActivity.ACTION_SUPER_RESOLUTION_ON
+                         else LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF
+            requireContext().sendBroadcast(Intent(action))
+            Toast.makeText(
+                requireContext(),
+                if (on) "已开启 MPV 画质增强" else "已关闭 MPV 画质增强",
+                Toast.LENGTH_SHORT
+            ).show()
         }
         binding.swDebugMode.isChecked = spUtil.debugMode
         binding.swDebugMode.setOnClickListener {

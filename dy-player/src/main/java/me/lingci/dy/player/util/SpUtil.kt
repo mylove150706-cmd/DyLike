@@ -181,6 +181,16 @@ open class SpUtil(context: Context) : SpBase(context) {
      */
     var labMpvSequentialRead by SPManager.boolean(true)
 
+    /**
+     * MPV FSR 画质增强：开启后给 MPV 内核挂 AMD FSR shader（LUMA hook 上的
+     * EASU 升采样 + RCAS 锐化），实时提升低分辨率视频清晰度。仅 MPV 内核生效。
+     *
+     * ⚠️ 跨模块约定：此 key 由 lib-player/player-mpv/MpvMediaPlayer 在 init 时
+     * 直接读取（app 默认 SharedPreferences），运行时也通过广播触发 MpvMediaPlayer
+     * 的 setSuperResolutionEnabled。重命名属性会破坏 MPV 端读取。
+     */
+    var labMpvSuperResolution by SPManager.boolean(false)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 

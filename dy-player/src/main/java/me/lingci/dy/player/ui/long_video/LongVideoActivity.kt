@@ -93,10 +93,9 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         private const val KEY_TEMP = "temp"
         private const val BACKGROUND_RECOVERY_WINDOW_MS = 5000L
 
-        // [SPIKE] 超分验证用广播 action（adb 触发同帧 dump + shader 切换）
-        const val ACTION_SPIKE_DUMP = "me.lingci.dy.player.spike.DUMP"
-        const val ACTION_SPIKE_SHADER_OFF = "me.lingci.dy.player.spike.SHADER_OFF"
-        const val ACTION_SPIKE_SHADER_ON = "me.lingci.dy.player.spike.SHADER_ON"
+        // 超分开关广播 action（adb 和 LabSettingsFragment 都可发）
+        const val ACTION_SUPER_RESOLUTION_ON = "me.lingci.dy.player.SUPER_RES_ON"
+        const val ACTION_SUPER_RESOLUTION_OFF = "me.lingci.dy.player.SUPER_RES_OFF"
 
         fun start(context: Context, list: ArrayList<VideoData>, index: Int, history: Boolean) {
             val bundle = bundleOf()
@@ -214,43 +213,31 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
 
-    // [SPIKE] 超分验证广播接收器：通过 adb 发广播触发同帧 dump + shader 切换，供 SSIM 对比。
-    // 验证通过后整块移除。
-    private val spikeShaderReceiver = object : android.content.BroadcastReceiver() {
+    // 超分开关广播接收器：收到 ON/OFF 时调用 MPV 的 setSuperResolutionEnabled。
+    private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val mpv = videoView.getCurrentPlayer() as? MpvMediaPlayer ?: return
             when (intent.action) {
-                ACTION_SPIKE_DUMP -> {
-                    // extra "name" 决定输出文件名：frame_with_shader.png / frame_baseline.png
-                    val name = intent.getStringExtra("name") ?: "frame"
-                    val outPath = java.io.File(filesDir, "shots/$name.png").absolutePath
-                    val ok = mpv.spikeTakeScreenshot(outPath)
+                ACTION_SUPER_RESOLUTION_ON -> {
+                    mpv.setSuperResolutionEnabled(true)
                     android.widget.Toast.makeText(
                         this@LongVideoActivity,
-                        if (ok) "[SPIKE] dump -> $name.png" else "[SPIKE] dump failed (no player?)",
+                        "MPV 画质增强：已开启",
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
                 }
-                ACTION_SPIKE_SHADER_OFF -> {
-                    mpv.spikeClearShaders()
+                ACTION_SUPER_RESOLUTION_OFF -> {
+                    mpv.setSuperResolutionEnabled(false)
                     android.widget.Toast.makeText(
                         this@LongVideoActivity,
-                        "[SPIKE] shaders OFF",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-                ACTION_SPIKE_SHADER_ON -> {
-                    mpv.spikeReloadShaders()
-                    android.widget.Toast.makeText(
-                        this@LongVideoActivity,
-                        "[SPIKE] shaders ON",
+                        "MPV 画质增强：已关闭",
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
                 }
             }
         }
     }
-    private var isSpikeReceiverRegistered = false
+    private var isSuperResReceiverRegistered = false
 
     private fun getPlayerCapabilities(): PlayerCapabilities {
         return videoView.getPlayerCapability(PlayerCapabilityProvider::class.java)
@@ -908,8 +895,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                 }
             }
         }
-        // [SPIKE] 注册超分验证广播接收器（让 adb 能触发 dump / shader 切换）
-        registerSpikeShaderReceiver()
+        // 注册超分开关广播接收器（让 adb 和设置页都能切换 FSR）
+        registerSuperResolutionReceiver()
     }
 
     override fun onPause() {
@@ -933,8 +920,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         super.onDestroy()
         // 注销 PiP 广播接收器，避免内存泄漏
         unregisterPipActionReceiver()
-        // [SPIKE] 注销超分验证广播接收器
-        unregisterSpikeShaderReceiver()
+        // 注销超分开关广播接收器
+        unregisterSuperResolutionReceiver()
         mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
@@ -1348,26 +1335,25 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         }
     }
 
-    // [SPIKE] 超分验证用：注册广播接收器（exported，让 adb 能发）。
-    private fun registerSpikeShaderReceiver() {
-        if (isSpikeReceiverRegistered) return
+    // 注册超分开关广播接收器（exported，让 adb 和 LabSettingsFragment 都能发）。
+    private fun registerSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) return
         val filter = IntentFilter().apply {
-            addAction(ACTION_SPIKE_DUMP)
-            addAction(ACTION_SPIKE_SHADER_OFF)
-            addAction(ACTION_SPIKE_SHADER_ON)
+            addAction(ACTION_SUPER_RESOLUTION_ON)
+            addAction(ACTION_SUPER_RESOLUTION_OFF)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(spikeShaderReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(superResolutionReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(spikeShaderReceiver, filter)
+            registerReceiver(superResolutionReceiver, filter)
         }
-        isSpikeReceiverRegistered = true
+        isSuperResReceiverRegistered = true
     }
 
-    private fun unregisterSpikeShaderReceiver() {
-        if (isSpikeReceiverRegistered) {
-            unregisterReceiver(spikeShaderReceiver)
-            isSpikeReceiverRegistered = false
+    private fun unregisterSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) {
+            unregisterReceiver(superResolutionReceiver)
+            isSuperResReceiverRegistered = false
         }
     }
 

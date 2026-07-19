@@ -143,53 +143,38 @@ class ShortVideoActivity : BaseActivity() {
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
 
-    // [SPIKE] 超分验证广播接收器（同 LongVideoActivity，让短视频也能触发 dump + shader 切换）
-    private val spikeShaderReceiver = object : android.content.BroadcastReceiver() {
+    // 超分开关广播接收器（同 LongVideoActivity，让短视频也能切换 FSR）
+    private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val mpv = mVideoView.getCurrentPlayer() as? me.lingci.lib.player.mpv.MpvMediaPlayer ?: return
             when (intent.action) {
-                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_DUMP -> {
-                    val name = intent.getStringExtra("name") ?: "frame"
-                    val outPath = File(filesDir, "shots/$name.png").absolutePath
-                    val ok = mpv.spikeTakeScreenshot(outPath)
-                    android.widget.Toast.makeText(
-                        this@ShortVideoActivity,
-                        if (ok) "[SPIKE] dump -> $name.png" else "[SPIKE] dump failed",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_OFF -> {
-                    mpv.spikeClearShaders()
-                    android.widget.Toast.makeText(this@ShortVideoActivity, "[SPIKE] shaders OFF", android.widget.Toast.LENGTH_SHORT).show()
-                }
-                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_ON -> {
-                    mpv.spikeReloadShaders()
-                    android.widget.Toast.makeText(this@ShortVideoActivity, "[SPIKE] shaders ON", android.widget.Toast.LENGTH_SHORT).show()
-                }
+                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_ON ->
+                    mpv.setSuperResolutionEnabled(true)
+                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF ->
+                    mpv.setSuperResolutionEnabled(false)
             }
         }
     }
-    private var isSpikeReceiverRegistered = false
+    private var isSuperResReceiverRegistered = false
 
-    private fun registerSpikeShaderReceiver() {
-        if (isSpikeReceiverRegistered) return
+    private fun registerSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) return
         val filter = android.content.IntentFilter().apply {
-            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_DUMP)
-            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_OFF)
-            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SPIKE_SHADER_ON)
+            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_ON)
+            addAction(me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF)
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(spikeShaderReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(superResolutionReceiver, filter, Context.RECEIVER_EXPORTED)
         } else {
-            registerReceiver(spikeShaderReceiver, filter)
+            registerReceiver(superResolutionReceiver, filter)
         }
-        isSpikeReceiverRegistered = true
+        isSuperResReceiverRegistered = true
     }
 
-    private fun unregisterSpikeShaderReceiver() {
-        if (isSpikeReceiverRegistered) {
-            unregisterReceiver(spikeShaderReceiver)
-            isSpikeReceiverRegistered = false
+    private fun unregisterSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) {
+            unregisterReceiver(superResolutionReceiver)
+            isSuperResReceiverRegistered = false
         }
     }
     private val isUserScroll = AtomicBoolean(false)
@@ -928,6 +913,8 @@ class ShortVideoActivity : BaseActivity() {
             mVideoView.resume()
         }
         timerCloseController.onResume()
+        // 注册超分开关广播接收器（让设置页和 adb 都能在短视频页切换 FSR）
+        registerSuperResolutionReceiver()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -960,6 +947,7 @@ class ShortVideoActivity : BaseActivity() {
         if (::mVideoView.isInitialized) {
             mVideoView.release()
         }
+        unregisterSuperResolutionReceiver()
         clearSurfaceTrace()
         playbackLogCache.clear()
     }
