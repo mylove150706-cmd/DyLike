@@ -1,94 +1,67 @@
 # Spike 报告：MPV GLSL 着色器超分在 DyLike 的可行性
 
-**日期**：2026-07-20（初版）/ 2026-07-19（v2 更新）
-**分支**：`spike/super-resolution-anime4k`
-**状态**：🔄 **结论推翻——超分功能可行**
+**日期**：2026-07-20（初版）/ 2026-07-19（v2 更新）/ 2026-07-20（v3 最终）
+**分支**：`spike/super-resolution-anime4k` → `feat/mpv-super-resolution`
+**状态**：⛔ **最终结论：不可行**（路线问题，非配置问题）
 **目的**：验证用户提议的「开启开关后对低分辨率视频超分到 1080p/2K/4K」功能，是否能在当前 MPV Android 集成下用 GLSL user shader 实现。
 
-## ⚠️ 重大更正
+## ⛔ 最终结论（v3）
 
-**初版结论「不可行」是错的。** 通过染色 shader（spike_red_tint.glsl）验证后确认：user shader hook 链路在 abdallahmehiz/mpv-android-lib:0.1.12 的 Android 集成下**是通的**，超分功能可行。
+**MPV Android 集成（abdallahmehiz/mpv-android-lib:0.1.12）下的 user shader 路线无法用于实时超分。**
 
-初版误判的根本原因有两个：
+这个结论经过了三轮验证：
+- v1（2026-07-20 初版）：Anime4K 等 shader SSIM≈1.00 → 判定「不可行」
+- v2（2026-07-19）：染色测试画面变黄 → 推翻 v1，判定「管线通了，可行」
+- **v3（2026-07-20 最终）**：FSR EASU + CAS 都无效果 → 推翻 v2，**真正确认不可行**
 
-1. **误读 mpv `dwidth/dheight` 属性的语义**
-   - 初版以为 `video-out-params/dw=403 dh=720` 表示 mpv 渲染目标尺寸 = 视频原始尺寸
-   - 实际上：`dwidth/dheight` 来自 `command.c:4712` 的 `M_PROPERTY_ALIAS("dwidth", "video-out-params/dw")`，它表示「视频应该按多大显示」（与像素比相关），**与 VO 实际 framebuffer 尺寸无关**
-   - mpv 上游 `video/out/opengl/context_android.c:104-122` 的 `android_reconfig()` 会把 VO 实际渲染分辨率（`vo->dwidth/dheight`）设为 `android-surface-size`（即 SurfaceView 物理像素 1256×2672），shader 是在这个尺寸的 FBO 上跑的
+## v3 关键证据（推翻 v2 的染色测试结论）
 
-2. **shader 选择 + hook 点选择都不适合实拍内容**
-   - Anime4K 是动漫专用（只对硬边线条/色块起作用），测实拍画面 SSIM≈1.00 是预期的
-   - adaptive-sharpen 挂的是 `POSTKERNEL` hook，**而 POSTKERNEL hook 在本 AAR 的 Android 集成下根本不触发**（染色 shader 实测确认）
-   - FSRCNNX 挂 LUMA hook 是会生效的，但对实拍内容的提升本来就微弱
+| Shader | Hook | 配置 | SSIM | 锐度比 | 结论 |
+|---|---|---|---|---|---|
+| FSR EASU+RCAS | LUMA | 默认 | 0.9956 | 1.002x | 无效 |
+| FSR EASU+RCAS | LUMA | + video-zoom=1.0（2x 放大） | 0.5632（仅尺寸变） | 0.240x（仅测量副作用） | EASU 算法无效果 |
+| **CAS** | LUMA | **SHARPENING=1.0（最大）** | **0.9989** | **0.984x** | **完全无效** |
 
-## 染色 shader 验证（决定性证据）
+所有测试都通过 `glsl-shaders` 属性确认 shader 已挂上。但画面无任何变化。
 
-为了判断 user shader hook 链路是否真的在 Android mpv 上跑，写了 `spike_red_tint.glsl`，包含三个 hook：
+## v2 染色测试为什么误导
 
-```glsl
-//!HOOK LUMA       // 把亮度 Y 强制设为 1.0
-//!HOOK CHROMA     // 把 Cb 设为 0
-//!HOOK RGB        // 返回纯红 vec4(1,0,0,c.a)
+v2 用 `spike_red_tint.glsl`（把像素强制改成 `vec4(1,0,0,a)`）测试，画面变黄，于是判定「LUMA hook 生效」。
+
+**这个判定错了。** 染色 shader 改的是**绝对像素值**——无论 hook 在什么分辨率执行、无论结果是否被后续管线覆盖，强制写入 `vec4(1,0,0)` 这种硬编码值总能保留下来。
+
+而 FSR EASU / CAS 改的是**相对像素值**（基于邻域卷积的锐化/放大）。如果 hook 在源分辨率执行、然后 GPU 用 bilinear 把结果缩放到 SurfaceView 时**重新做了插值**，所有卷积效果都会被插值覆盖回原样。
+
+也就是说：**LUMA/CHROMA hook 的代码确实被执行了，但 hook 输出没有被最终渲染管线采用**。GPU 的最后 bilinear blit 用源图像重新插值，覆盖了 hook 的所有卷积效果。染色（绝对值）能存活，锐化/放大（相对值）被覆盖。
+
+## 技术原理分析
+
+mpv 在 Android 上的渲染路径：
+
+```
+video frame (402x720)
+   ↓
+[hwdec 解码]
+   ↓
+[user shader hooks 在源分辨率执行] ← LUMA/CHROMA hook 在这里跑
+   ↓
+[hook 输出]                          ← 但这个输出没有被采用！
+   ↓
+[GPU bilinear blit 把源图像缩放到 SurfaceView (1256x2808)]
+   ↑ 这里用的是源图像，不是 hook 输出
+   ↓
+[显示]
 ```
 
-**实测结果**：画面变成**纯黄色** `(R=1, G=1, B=0)`。
+`context_android.c:104-122` 的 `android_reconfig()` 设置了 `vo->dwidth = surface_w`，但这个值只影响最后的 blit 目标，不影响 user shader 的执行分辨率或输出采用。
 
-按 BT.601 YUV→RGB 反推：
-- Y=1.0, Cb=0, Cr≈0.5（原值，接近中性）
-- R = 1.0 + 1.402·0 = 1.0
-- G = 1.0 − 0.344·(−0.5) − 0.714·0 = 1.172 → clip 到 1.0
-- B = 1.0 + 1.772·(−0.5) = 0.114 → ≈ 0
-- = (1, 1, 0) = **纯黄** ✅ 完全吻合
+## 之前 v2 报告中关于「dwidth/dheight 误读」的判断仍然成立
 
-### 三个 hook 点的有效性
-
-| Hook | 染色 shader 是否生效 | 含义 |
-|---|---|---|
-| **LUMA** | ✅ **生效**（Y 通道被改了） | 超分主战场——FSRCNNX、Anime4K Upscale_CNN 都挂这里 |
-| **CHROMA** | ✅ **生效**（Cb 被改了） | 色度升采样（KrigBilateral）会生效 |
-| **POSTKERNEL / RGB** | ❌ **不生效**（RGB 阶段 hook 没跑） | adaptive-sharpen 等后处理必须改挂到 LUMA |
-
-## 之前 4 次 SSIM 测试的真实含义
-
-初版 4 次测试都用 `vo=gpu` + 各种 shader 组合，SSIM 都 ≈ 1.00。现在重读：
-
-| # | Shader 组合 | 真相 |
-|---|---|---|
-| 1 | Anime4K Mode A（3 shaders） | Anime4K 对实拍本来就几乎 passthrough，SSIM≈1.00 预期 |
-| 2 | FSRCNNX + adaptive-sharpen | FSRCNNX 对实拍微弱 + adaptive-sharpen POSTKERNEL 没跑 → 几乎无变化 |
-| 3 | FSRCNNX + adaptive-sharpen + hwdec=no | hwdec 不影响 shader 执行，结果同 #2 |
-| 4 | FSRCNNX + adaptive-sharpen + vo=gpu-next | 同 #2，且 vo=gpu-next 可能改变 hook 语义但没改变根本问题 |
-
-**关键**：4 次测试都包含 adaptive-sharpen（POSTKERNEL），它根本没生效。FSRCNNX（LUMA）应该是生效的，但对实拍提升微小，被 SSIM 淹没。
+v2 报告中关于 `command.c:4712 M_PROPERTY_ALIAS("dwidth", "video-out-params/dw")` 的发现是对的：客户端属性层的 dwidth/dhight 是「视频应该按多大显示」（与像素比相关），跟 VO 实际 framebuffer 尺寸无关。但这跟 shader 是否生效**没关系**——shader 是否生效取决于 hook 输出是否被采用，而本 AAR 的实现里 hook 输出被忽略了。
 
 ## 结论
 
-**用户提议的「shader 实时超分」功能在当前 mpv Android 集成下可以实现，但需要：**
+**用户提议的「shader 实时超分」功能在当前 mpv Android 集成下无法实现。** 这不是配置问题，不是 shader 选择问题，是 AAR 的渲染管线设计问题——hook 输出没有被采用。
 
-1. **shader 选择必须对实拍内容有效**：FSRCNNX 太弱，应该换 FSR（FidelityFX Super Resolution）、CAS（Contrast Adaptive Sharpening）或 NNEDI3 等对自然图像提升明显的
-2. **后处理必须挂 LUMA，不能挂 POSTKERNEL**：POSTKERNEL hook 在本 AAR 上不触发
-3. **超分强度可能比桌面 mpv 弱**：因为 Android 上 hwdec=auto 会跳过部分 CPU 处理路径，shader 输入可能是已经硬件解码的低质量像素
+后续走 **ExoPlayer + Media3 GlEffect** 路线（自定义 OpenGL 后处理层，绕开 mpv 的 hook 机制）。
 
-## 可复现的代码位置
-
-- Spike 代码：`spike/super-resolution-anime4k` 分支
-- 染色 shader：`lib-player/player-mpv/src/main/assets/shaders/spike_red_tint.glsl`
-- 关键文件：
-  - `lib-player/player-mpv/src/main/java/me/lingci/lib/player/mpv/MpvMediaPlayer.kt`（spike 注入点：`applySpikeAnime4KShaders()`）
-  - `dy-player/.../ui/long_video/LongVideoActivity.kt`（spike broadcast receiver）
-  - `dy-player/.../ui/short_video/ShortVideoActivity.kt`（spike broadcast receiver 副本）
-
-## 复现步骤（验证 hook 链路）
-
-```bash
-# 1. 切到 spike 分支
-git checkout spike/super-resolution-anime4k
-
-# 2. 把染色 shader 重新挂上（修改 applySpikeAnime4KShaders 加载 spike_red_tint.glsl）
-
-# 3. 构建 + 安装
-./gradlew :dy-player:installBetaDebug
-
-# 4. 手机播放任意视频
-# 5. 观察画面：应该变成纯黄色，证明 LUMA/CHROMA hook 生效
-```
