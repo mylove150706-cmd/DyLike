@@ -137,6 +137,13 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
      */
     private val SP_KEY_LAB_MPV_SEQUENTIAL_READ = "labMpvSequentialRead"
     private val SP_LAB_MPV_SEQUENTIAL_READ_DEFAULT = true
+
+    /**
+     * FSR 画质增强开关的 SP key（跨模块契约同上）。
+     * 由 dy-player/SpUtil.labMpvSuperResolution 写入，这里按字符串读取。
+     */
+    private val SP_KEY_LAB_MPV_SUPER_RESOLUTION = "labMpvSuperResolution"
+    private val SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT = false
     
     // HDR模式
     enum class HdrMode {
@@ -651,11 +658,10 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
             // 设置运行时选项（在mpv.init()之后）
             setRuntimeOptions()
 
-            // [SPIKE] 验证：仅加日志，确认编译通过
-            L.d("[SPIKE] runtime options set, ready for shader injection")
+            L.d("runtime options set, ready for super-resolution check")
 
             if (!isMpvInitialized) {
-                applySpikeAnime4KShaders()
+                applySuperResolutionOnInit()
             }
 
             /* set hardcoded options */
@@ -1108,162 +1114,83 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
         setHdrMode(hdrMode)
     }
 
-    private fun applySpikeAnime4KShaders() {
-        if (isReleasing || isReleased || isNativeDestroyed) return
-        try {
-            // [SPIKE v8] 验证已完成：LUMA/CHROMA hook 在 Android mpv 上生效（染色 shader 画面变黄）。
-            // 但 RGB/POSTKERNEL hook 不生效（adaptive-sharpen 没跑）。
-            // 当前临时禁用所有 spike shader，避免影响正常播放。
-            // 若要重新验证：把下面 shaderNames 改成 listOf("spike_red_tint.glsl") 即可。
-            // 详见 docs/superpowers/specs/2026-07-20-mpv-shader-super-resolution-spike.md
-            val shaderNames = emptyList<String>()
-            if (shaderNames.isEmpty()) {
-                L.d("[SPIKE] shader pipeline verified (v8): LUMA/CHROMA hooks fire, POSTKERNEL does not. Skipping shader load.")
-                spikeShaderPaths = emptyList()
-                return
-            }
-            val outDir = java.io.File(appContext.filesDir, "shaders")
-            if (!outDir.exists()) outDir.mkdirs()
-            val paths = ArrayList<String>()
-            for (name in shaderNames) {
-                val out = java.io.File(outDir, name)
-                if (!out.exists() || out.length() == 0L) {
-                    val inp = appContext.assets.open("shaders/$name")
-                    val fos = java.io.FileOutputStream(out)
-                    inp.use { i -> fos.use { o -> i.copyTo(o) } }
-                }
-                if (out.exists() && out.length() > 0L) paths.add(out.absolutePath)
-            }
-            if (paths.isEmpty()) {
-                L.e("[SPIKE] no shader files available, skip")
-                return
-            }
-            L.d("[SPIKE] applying Anime4K shaders: $paths")
-            for (path in paths) {
-                mpv.command("change-list", "glsl-shaders", "add", path)
-            }
-            L.d("[SPIKE] Anime4K shaders applied (${paths.size} files)")
-            spikeShaderPaths = paths
-        } catch (e: Exception) {
-            L.e("[SPIKE] apply Anime4K shaders failed: ${e.message}")
-        }
-    }
-
-    // [SPIKE] 保存已加载的 shader 路径，供 toggle/dump 使用
-    private var spikeShaderPaths: List<String> = emptyList()
-
     /**
-     * [SPIKE] 用 mpv 内置 screenshot-tofile 抓「shader 处理后」的当前帧。
-     * 必须用 scaled 模式（不能用 video）——Anime4K 输出会被 video 模式降回原分辨率。
-     * 仅在 spike 验证用。
+     * FSR 画质增强：开启时挂 AMD FSR shader 到 LUMA hook（EASU 升采样 + RCAS 锐化），
+     * 关闭时清空。可在播放中调用，pause 状态下会强制 seek 重渲染当前帧。
+     *
+     * 详见 spec：docs/superpowers/specs/2026-07-20-mpv-fsr-super-resolution-design.md
+     *
+     * ⚠️ 跨模块契约：开关 SP 键为 `labMpvSuperResolution`，由 dy-player/SpUtil 定义。
+     * 这里通过字符串字面量读取。改名需同步两边。
      */
-    fun spikeTakeScreenshot(outPath: String): Boolean {
-        val debugLog = java.io.File(appContext.filesDir, "shots/_debug.log")
-        fun dbg(msg: String) {
-            try {
-                debugLog.parentFile?.mkdirs()
-                debugLog.appendText("[${System.currentTimeMillis()}] $msg\n")
-            } catch (_: Exception) {}
-            L.d("[SPIKE] $msg")
-        }
-        dbg("spikeTakeScreenshot START outPath=$outPath isMpvInitialized=$isMpvInitialized isNativeDestroyed=$isNativeDestroyed")
-        if (!isMpvInitialized || isNativeDestroyed) {
-            dbg("RETURN false: not initialized")
-            return false
-        }
-        // 先报告 mpv 当前状态（不依赖 screenshot，纯粹查属性）
-        try {
-            val glslShaders = mpv.getPropertyString("glsl-shaders")
-            val vo = mpv.getPropertyString("vo")
-            val filename = mpv.getPropertyString("filename")
-            val width = mpv.getPropertyInt("width")
-            val height = mpv.getPropertyInt("height")
-            val dwidth = mpv.getPropertyInt("dwidth")
-            val dheight = mpv.getPropertyInt("dheight")
-            val paused = mpv.getPropertyBoolean("pause")
-            val coreIdle = mpv.getPropertyBoolean("core-idle")
-            // video-params 包含真实渲染参数：rotate/w/h（解码）、par（像素比）、...
-            val videoParams = mpv.getPropertyNode("video-params")
-            val videoOutParams = mpv.getPropertyNode("video-out-params")
-            val scale = mpv.getPropertyString("scale")
-            val cscale = mpv.getPropertyString("cscale")
-            val dscale = mpv.getPropertyString("dscale")
-            dbg("STATUS vo=$vo filename=$filename")
-            dbg("STATUS video ${width}x${height} display ${dwidth}x${dheight}")
-            dbg("STATUS pause=$paused core-idle=$coreIdle")
-            dbg("STATUS scale=$scale cscale=$cscale dscale=$dscale")
-            dbg("STATUS video-params=$videoParams")
-            dbg("STATUS video-out-params=$videoOutParams")
-            dbg("STATUS glsl-shaders=$glslShaders")
-            dbg("STATUS spikeShaderPaths=$spikeShaderPaths")
-        } catch (e: Exception) {
-            dbg("STATUS query failed: ${e.message}")
-        }
-        return try {
-            val shotsDir = java.io.File(outPath).parentFile
-            if (shotsDir != null && !shotsDir.exists()) shotsDir.mkdirs()
-            dbg("shotsDir=${shotsDir?.absolutePath} exists=${shotsDir?.exists()}")
-            // 关键：dump 前强制 seek 当前位置，确保 mpv 用「最新 shader 配置」重渲染当前帧
-            spikeForceRerender()
-            Thread.sleep(500)
-            dbg("calling mpv.command(screenshot-tofile, outPath, scaled)")
-            val result = mpv.commandNode("screenshot-to-file", outPath, "scaled")
-            dbg("commandNode returned: $result")
-            Thread.sleep(1500)
-            val outFile = java.io.File(outPath)
-            dbg("outFile exists=${outFile.exists()} size=${if (outFile.exists()) outFile.length() else 0}")
-            outFile.exists() && outFile.length() > 0
-        } catch (e: Exception) {
-            dbg("EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
-            false
-        }
-    }
-
-    /**
-     * [SPIKE] 清空所有 user shader（保留 mpv 内置 scaler）。
-     * 切换后强制 seek 当前位置触发重渲染（pause 状态下 shader 切换不会自动重绘）。
-     */
-    fun spikeClearShaders() {
+    fun setSuperResolutionEnabled(enabled: Boolean) {
         if (!isMpvInitialized || isNativeDestroyed) return
         try {
-            mpv.command("set", "glsl-shaders", "")
-            spikeForceRerender()
-            L.d("[SPIKE] shaders cleared")
+            if (enabled) {
+                val paths = ensureShadersCopied(superResolutionShaderNames)
+                if (paths.isEmpty()) {
+                    L.e("Super-resolution: shader files missing, cannot enable")
+                    return
+                }
+                for (path in paths) {
+                    mpv.command("change-list", "glsl-shaders", "add", path)
+                }
+                L.d("Super-resolution: enabled (${paths.size} shaders)")
+            } else {
+                mpv.command("set", "glsl-shaders", "")
+                L.d("Super-resolution: disabled")
+            }
+            forceRerender()
         } catch (e: Exception) {
-            L.e("[SPIKE] clear shaders failed: ${e.message}")
+            L.e("setSuperResolutionEnabled failed: ${e.message}")
         }
     }
 
     /**
-     * [SPIKE] 通过 seek 到当前位置强制 mpv 重渲染当前帧。
-     * 在 pause 状态下，单纯改 shader 不会触发重绘——必须 seek。
+     * 初始化时按 SP 决定要不要默认挂上 FSR。
+     * 保证切到下个视频/重启 App 后开关状态持续生效。
      */
-    private fun spikeForceRerender() {
+    private fun applySuperResolutionOnInit() {
+        val sp = PreferenceManager.getDefaultSharedPreferences(appContext)
+        val enabled = sp.getBoolean(
+            SP_KEY_LAB_MPV_SUPER_RESOLUTION,
+            SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT
+        )
+        if (enabled) setSuperResolutionEnabled(true)
+    }
+
+    /**
+     * 从 assets 拷贝 shader 文件到 filesDir/shaders/（若已存在且非空则跳过）。
+     * 返回拷贝后的绝对路径列表。
+     */
+    private fun ensureShadersCopied(names: List<String>): List<String> {
+        val outDir = java.io.File(appContext.filesDir, "shaders")
+        if (!outDir.exists()) outDir.mkdirs()
+        val paths = ArrayList<String>()
+        for (name in names) {
+            val out = java.io.File(outDir, name)
+            if (!out.exists() || out.length() == 0L) {
+                appContext.assets.open("shaders/$name").use { i ->
+                    java.io.FileOutputStream(out).use { o -> i.copyTo(o) }
+                }
+            }
+            if (out.exists() && out.length() > 0L) paths.add(out.absolutePath)
+        }
+        return paths
+    }
+
+    /**
+     * 在 pause 状态下强制 mpv 重渲染当前帧（seek 到当前位置）。
+     * 改完 shader 后 mpv 不会自动重绘 paused frame，需要主动触发。
+     */
+    private fun forceRerender() {
         try {
             val pos = mpv.getPropertyDouble("time-pos") ?: return
             mpv.command("seek", pos.toString(), "absolute", "exact")
         } catch (_: Exception) {}
     }
 
-    /**
-     * [SPIKE] 重新加载 spike 的 Anime4K shader。
-     */
-    fun spikeReloadShaders() {
-        if (!isMpvInitialized || isNativeDestroyed) return
-        if (spikeShaderPaths.isEmpty()) {
-            applySpikeAnime4KShaders()
-            return
-        }
-        try {
-            for (path in spikeShaderPaths) {
-                mpv.command("change-list", "glsl-shaders", "add", path)
-            }
-            spikeForceRerender()
-            L.d("[SPIKE] shaders reloaded (${spikeShaderPaths.size})")
-        } catch (e: Exception) {
-            L.e("[SPIKE] reload shaders failed: ${e.message}")
-        }
-    }
+    private val superResolutionShaderNames = listOf("FSR.glsl")
 
     override fun setOptions() {
         if (isReleasing || isReleased || isNativeDestroyed) return
