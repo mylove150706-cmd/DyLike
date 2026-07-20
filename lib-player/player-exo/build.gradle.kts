@@ -45,6 +45,7 @@ dependencies {
     //api(libs.dkplayer.java)
     api(libs.bundles.media3.exo)
     api(libs.media3.inspector)
+    api(libs.media3.effect)
     api(libs.media3.ffmpeg) {
         exclude(group = "androidx.media3")
         exclude(group = "org.jetbrains.kotlin")

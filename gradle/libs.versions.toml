@@ -96,6 +96,7 @@ media3-datasource-rtmp = { module = "androidx.media3:media3-datasource-rtmp", ve
 media3-datasource-okhttp = { module = "androidx.media3:media3-datasource-okhttp", version.ref = "media3" }
 media3-inspector = { module = "androidx.media3:media3-inspector", version.ref = "media3" }
 media3-transformer = { module = "androidx.media3:media3-transformer", version.ref = "media3" }
+media3-effect = { module = "androidx.media3:media3-effect", version.ref = "media3" }
 # https://mvnrepository.com/artifact/org.jellyfin.media3/media3-ffmpeg-decoder
 media3-ffmpeg = { module = "org.jellyfin.media3:media3-ffmpeg-decoder", version.ref = "media3-ffmepg" }
 # https://mvnrepository.com/artifact/io.github.abdallahmehiz/mpv-android-lib
