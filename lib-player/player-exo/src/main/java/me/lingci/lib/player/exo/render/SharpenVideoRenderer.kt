@@ -119,8 +119,11 @@ class SharpenVideoRenderer(
                 p.setSamplerTexIdUniform("uVideoTex", textureId, /* texUnitIndex */ 0)
                 p.setFloatsUniform("uTexTransform", transformMatrix)
                 // Phase 2: 设置 unsharp mask 所需的 uTexelSize + uSharpenAmount
+                // 采样半径放大 3 倍：3x3 核覆盖更大的物理范围，锐化效果更明显
+                // （低分辨率视频放大到全屏时，1 像素步长的锐化差异被 bilinear 稀释）
                 if (videoWidth > 0 && videoHeight > 0) {
-                    p.setFloatsUniform("uTexelSize", floatArrayOf(1f / videoWidth, 1f / videoHeight))
+                    val radius = 3.0f
+                    p.setFloatsUniform("uTexelSize", floatArrayOf(radius / videoWidth, radius / videoHeight))
                 }
                 p.setFloatUniform("uSharpenAmount", sharpenAmount)
                 p.bindAttributesAndUniforms()
