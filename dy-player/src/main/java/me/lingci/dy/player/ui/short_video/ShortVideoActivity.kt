@@ -143,15 +143,15 @@ class ShortVideoActivity : BaseActivity() {
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
 
-    // 超分开关广播接收器（同 LongVideoActivity，让短视频也能切换 FSR）
+    // 超分开关广播接收器（同 LongVideoActivity，让短视频也能切换锐化效果）
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val mpv = mVideoView.getCurrentPlayer() as? me.lingci.lib.player.mpv.MpvMediaPlayer ?: return
+            val player = mVideoView.getCurrentPlayer() as? me.lingci.lib.player.exo.CustomExoMediaPlayer ?: return
             when (intent.action) {
                 me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_ON ->
-                    mpv.setSuperResolutionEnabled(true)
+                    player.setSuperResolutionEnabled(true)
                 me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF ->
-                    mpv.setSuperResolutionEnabled(false)
+                    player.setSuperResolutionEnabled(false)
             }
         }
     }

@@ -45,7 +45,6 @@ import me.lingci.lib.base.util.Log
 import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.player.danmaku.PlayerInitializer
-import me.lingci.lib.player.mpv.MpvMediaPlayer
 import me.lingci.lib.player.exo.CustomExoMediaPlayer
 import me.lingci.lib.player.listener.OnFontChangeListener
 import me.lingci.lib.player.listener.OnLongVideoListener
@@ -213,24 +212,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
 
-    // 超分开关广播接收器：收到 ON/OFF 时调用 MPV 的 setSuperResolutionEnabled。
+    // 超分开关广播接收器：收到 ON/OFF 时调用 ExoPlayer 的 setSuperResolutionEnabled。
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val mpv = videoView.getCurrentPlayer() as? MpvMediaPlayer ?: return
+            val player = videoView.getCurrentPlayer() as? CustomExoMediaPlayer ?: return
             when (intent.action) {
                 ACTION_SUPER_RESOLUTION_ON -> {
-                    mpv.setSuperResolutionEnabled(true)
+                    player.setSuperResolutionEnabled(true)
                     android.widget.Toast.makeText(
                         this@LongVideoActivity,
-                        "MPV 画质增强：已开启",
+                        "画质增强：已开启",
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
                 }
                 ACTION_SUPER_RESOLUTION_OFF -> {
-                    mpv.setSuperResolutionEnabled(false)
+                    player.setSuperResolutionEnabled(false)
                     android.widget.Toast.makeText(
                         this@LongVideoActivity,
-                        "MPV 画质增强：已关闭",
+                        "画质增强：已关闭",
                         android.widget.Toast.LENGTH_SHORT
                     ).show()
                 }
