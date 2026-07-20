@@ -445,3 +445,20 @@ adb 触发 SUPER_RES_ON → replayCurrentVideo → 等画面重新播放 → 肉
 3. **HDR 支持**：现在用 RGBA_8888（8bit），HDR 视频会被降级；未来可加 RGBA_F16 配置
 4. **性能优化**：3x3 → separable 2-pass，减少 GPU 带宽
 5. **MPV 路线**：如果未来 MPV 改用 GLSurfaceView 后端，可以复用 SharpenVideoRenderer
+
+## 实施记录
+
+### Phase 1 染色测试（2026-07-20）
+
+- **设备**：emulator-5554（Android 35 x86_64）
+- **测试视频**：`/sdcard/Movies/long_test.mp4`（行车记录仪，720p）
+- **结果**：✅ **PASSED**
+- **证据**：
+  - baseline center RGB: R=150.2 G=150.2 B=156.1
+  - tinted   center RGB: R=193.7 G=166.7 B=170.0
+  - R 通道上升 +43.5，R-G 差 +27.0 → 画面明显变红
+- **logcat**：
+  - `SharpenVideoRenderer: onSurfaceCreated OK, textureId=1`
+  - `GlRenderView: setSurface OK`
+  - 无 GlException
+- **结论**：GLSurfaceView pipeline 完全跑通。LUMA hook / Media3 FinalShaderWrapper 的两次失败教训终于被绕过。可以进入 Phase 2（换锐化 shader）。
