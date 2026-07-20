@@ -193,8 +193,8 @@ class SharpenVideoRenderer(
             // 渲染优先（每帧都渲染，保证流畅）
             drawNcnnResultToScreen()
 
-            // 异步提交：后台空闲时 + 每 10 帧才读取一次（减少 glReadPixels 阻塞）
-            if (!ncnnInferInProgress && frameCount % 10 == 0) {
+            // 异步提交：后台空闲时才读取 + 推理
+            if (!ncnnInferInProgress) {
                 submitNcnnInference()
             }
         } else {
@@ -243,28 +243,24 @@ class SharpenVideoRenderer(
 
         ncnnInferInProgress = true
         try {
-            ensureSmallFbo()
-            // blit 到小 FBO
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
-            GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            blitProgramForNcnn!!.use()
-            blitProgramForNcnn!!.setSamplerTexIdUniform("uTexSampler", fboTextureId, 0)
-            blitProgramForNcnn!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
-            blitProgramForNcnn!!.bindAttributesAndUniforms()
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-            // 读像素
-            GLES20.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensureSmallPixelBuffer())
+            // 直接从源 FBO 读像素（不做 GPU blit 到小 FBO）
+            // GPU blit + glReadPixels 的组合会强制 flush GL 管线导致卡顿
+            // 直接读源 FBO + 后台 CPU 缩放更可靠
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            smallPixelBuffer!!.rewind()
-            val inputBytes = ByteArray(SMALL_W * SMALL_H * 4)
-            smallPixelBuffer!!.get(inputBytes)
+            ensurePixelBuffer().rewind()
+            val fullBytes = ByteArray(fboWidth * fboHeight * 4)
+            ensurePixelBuffer().get(fullBytes)
 
+            val fw = fboWidth
+            val fh = fboHeight
             ncnnExecutor.execute {
                 try {
-                    val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
+                    // CPU 缩放到 640×360（在后台线程，不阻塞 GL 线程）
+                    val scaledBytes = scaleDownRgba(fullBytes, fw, fh, SMALL_W, SMALL_H)
+                    val ncnnOut = sr.infer(scaledBytes, SMALL_W, SMALL_H)
                     if (ncnnOut != null) {
                         ncnnResultBytes = ncnnOut.first
                         ncnnResultWidth = ncnnOut.second
@@ -279,6 +275,9 @@ class SharpenVideoRenderer(
             }
         } catch (e: Exception) {
             AndroidLog.e("SharpenVideoRenderer", "NCNN submit failed: ${e.message}")
+            ncnnInferInProgress = false
+        }
+    }
             ncnnInferInProgress = false
         }
     }
