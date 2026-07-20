@@ -60,14 +60,20 @@ class SharpenVideoRenderer(
     private var videoWidth = 0
     private var videoHeight = 0
 
-    // ===== NCNN 混合模式字段 =====
+    // ===== NCNN 字段 =====
     private var ncnnSr: me.lingci.lib.player.exo.ncnn.NcnnSuperResolution? = null
     private var frameCount = 0
     private var ncnnOutputTexId = 0
-    private var pixelBuffer: java.nio.ByteBuffer? = null
     private var blitProgramForNcnn: GlProgram? = null
 
-    // 异步推理：简单可靠版
+    // GPU 缩放 FBO（640×360，避免 glReadPixels 1080p）
+    private var smallFboId = 0
+    private var smallFboTexId = 0
+    private val SMALL_W = 640
+    private val SMALL_H = 360
+    private var smallPixelBuffer: java.nio.ByteBuffer? = null
+
+    // 异步推理
     private val ncnnExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile private var ncnnInferInProgress = false
     @Volatile private var ncnnResultReady = false
@@ -75,7 +81,6 @@ class SharpenVideoRenderer(
     @Volatile private var ncnnResultWidth = 0
     @Volatile private var ncnnResultHeight = 0
     private var ncnnHasValidResult = false
-    private val NCNN_INFER_INTERVAL = 2
 
     private val sharpenAmount: Float = try {
         val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
@@ -270,27 +275,33 @@ class SharpenVideoRenderer(
             }
         }
 
-        // 2. 按频率提交推理
-        if (!ncnnInferInProgress && frameCount % NCNN_INFER_INTERVAL == 0) {
+        // 2. 提交推理：GPU 缩放到 640×360 FBO → glReadPixels 小 FBO → NCNN
+        if (!ncnnInferInProgress) {
             ncnnInferInProgress = true
             try {
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
+                // GPU 缩放：用 blit shader 把源 FBO 缩放到小 FBO（GPU 完成，不占 CPU）
+                ensureSmallFbo()
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
+                GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                blitProgram!!.use()
+                blitProgram!!.setSamplerTexIdUniform("uVideoTex", fboTextureId, 0)
+                blitProgram!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                blitProgram!!.bindAttributesAndUniforms()
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                // 从小 FBO 读像素（640×360×4 = 0.9MB，比 1080p 的 8MB 快 9 倍）
+                GLES20.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensureSmallPixelBuffer())
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-                pixelBuffer!!.rewind()
-                val fullBytes = ByteArray(fboWidth * fboHeight * 4)
-                pixelBuffer!!.get(fullBytes)
-
-                val targetW = 640
-                val targetH = 360
-                val fw = fboWidth
-                val fh = fboHeight
+                smallPixelBuffer!!.rewind()
+                val inputBytes = ByteArray(SMALL_W * SMALL_H * 4)
+                smallPixelBuffer!!.get(inputBytes)
 
                 ncnnExecutor.execute {
                     try {
-                        val scaledBytes = scaleDownRgba(fullBytes, fw, fh, targetW, targetH)
-                        val ncnnOut = sr.infer(scaledBytes, targetW, targetH)
+                        val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
                         if (ncnnOut != null) {
                             ncnnResultBytes = ncnnOut.first
                             ncnnResultWidth = ncnnOut.second
@@ -304,7 +315,7 @@ class SharpenVideoRenderer(
                     }
                 }
             } catch (e: Exception) {
-                AndroidLog.e("SharpenVideoRenderer", "glReadPixels for NCNN failed: ${e.message}")
+                AndroidLog.e("SharpenVideoRenderer", "NCNN submit failed: ${e.message}")
                 ncnnInferInProgress = false
             }
         }
@@ -339,13 +350,46 @@ class SharpenVideoRenderer(
         }
     }
 
+    /** 创建 640×360 小 FBO（GPU 缩放目标） */
+    private fun ensureSmallFbo() {
+        if (smallFboId != 0) return
+        // 纹理
+        val texIds = IntArray(1)
+        GLES20.glGenTextures(1, texIds, 0)
+        smallFboTexId = texIds[0]
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, smallFboTexId)
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+            SMALL_W, SMALL_H, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        // FBO
+        val fboIds = IntArray(1)
+        GLES20.glGenFramebuffers(1, fboIds, 0)
+        smallFboId = fboIds[0]
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
+        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
+            GLES20.GL_TEXTURE_2D, smallFboTexId, 0)
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+    }
+
+    private fun ensureSmallPixelBuffer(): java.nio.ByteBuffer {
+        val size = SMALL_W * SMALL_H * 4
+        if (smallPixelBuffer == null || smallPixelBuffer!!.capacity() < size) {
+            smallPixelBuffer = java.nio.ByteBuffer.allocateDirect(size)
+        }
+        smallPixelBuffer!!.rewind()
+        return smallPixelBuffer!!
+    }
+
     private fun ensurePixelBuffer(): java.nio.ByteBuffer {
         val size = fboWidth * fboHeight * 4
-        if (pixelBuffer == null || pixelBuffer!!.capacity() < size) {
-            pixelBuffer = java.nio.ByteBuffer.allocateDirect(size)
+        if (smallPixelBuffer == null || smallPixelBuffer!!.capacity() < size) {
+            smallPixelBuffer = java.nio.ByteBuffer.allocateDirect(size)
         }
-        pixelBuffer!!.rewind()
-        return pixelBuffer!!
+        smallPixelBuffer!!.rewind()
+        return smallPixelBuffer!!
     }
 
     /**
@@ -429,6 +473,10 @@ class SharpenVideoRenderer(
             if (fboId != 0) {
                 GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
                 GLES20.glDeleteTextures(1, intArrayOf(fboTextureId), 0)
+            }
+            if (smallFboId != 0) {
+                GLES20.glDeleteFramebuffers(1, intArrayOf(smallFboId), 0)
+                GLES20.glDeleteTextures(1, intArrayOf(smallFboTexId), 0)
             }
             if (ncnnOutputTexId != 0) {
                 GLES20.glDeleteTextures(1, intArrayOf(ncnnOutputTexId), 0)
