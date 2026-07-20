@@ -7,6 +7,7 @@ import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import androidx.annotation.OptIn
 import androidx.media3.common.C
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -24,7 +25,9 @@ import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import android.preference.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
+import me.lingci.lib.player.exo.effect.SuperResolutionEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -79,6 +82,12 @@ class CustomExoMediaPlayer(context: Context) : ExoMediaPlayer(context),
         private const val SUBTITLE_TRACE_INPUT_TAG = "SubtitleTraceInput"
         private const val CUE_DIMEN_UNSET = Cue.DIMEN_UNSET
         private const val BACKEND_EXO = "exo"
+
+        // 跨模块契约：SP 键名跟 dy-player/SpUtil 保持一致。
+        // 保留 labMpvSuperResolution 这个历史名（兼容备份文件和已开过该开关的用户），
+        // 但语义上现在是 ExoPlayer 的画质增强。
+        private const val SP_KEY_LAB_MPV_SUPER_RESOLUTION = "labMpvSuperResolution"
+        private const val SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT = false
     }
 
     private val mContext = context
@@ -152,8 +161,38 @@ class CustomExoMediaPlayer(context: Context) : ExoMediaPlayer(context),
             .build()
     }
 
+    /**
+     * 画质增强开关。开启时挂 SuperResolutionEffect，关闭时清空 effects。
+     * 可在播放中调用，Media3 会自动重建 video output。
+     *
+     * ⚠️ 跨模块契约：开关 SP 键为 `labMpvSuperResolution`（历史名），
+     * 由 dy-player/SpUtil 定义，这里通过字符串字面量读取。
+     */
+    fun setSuperResolutionEnabled(enabled: Boolean) {
+        val effects: List<Effect> = if (enabled) {
+            listOf(SuperResolutionEffect(strength = 1.0f))
+        } else {
+            emptyList()
+        }
+        setVideoEffects(effects)
+    }
+
+    /**
+     * 初始化时按 SP 决定要不要默认挂上。
+     * 保证切到下个视频/重启 App 后开关状态持续生效。
+     */
+    private fun applySuperResolutionOnInit() {
+        val sp = PreferenceManager.getDefaultSharedPreferences(mContext)
+        val enabled = sp.getBoolean(
+            SP_KEY_LAB_MPV_SUPER_RESOLUTION,
+            SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT
+        )
+        if (enabled) setSuperResolutionEnabled(true)
+    }
+
     override fun initPlayer() {
         super.initPlayer()
+        applySuperResolutionOnInit()
         mInternalPlayer.addListener(
             object : Player.Listener {
                 override fun onTracksChanged(tracks: Tracks) {
