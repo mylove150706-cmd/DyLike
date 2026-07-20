@@ -76,11 +76,11 @@ class SharpenVideoRenderer(
             }
             // 3. 通知外层（外层负责切回主线程把 Surface 给 ExoPlayer）
             onSurfaceTextureReady(surfaceTexture!!)
-            // 4. 编译 shader（unsharp mask - 已验证有效，SGSR1 适配版画面异常已弃用）
+            // 4. 编译 shader（SGSR1 忠实移植版）
             program = GlProgram(
                 context,
                 /* vertexShaderFilePath */ "shaders/video_vertex_es2.glsl",
-                /* fragmentShaderFilePath */ "shaders/unsharp_fragment_es2.glsl"
+                /* fragmentShaderFilePath */ "shaders/sgsr_fragment_es2.glsl"
             ).apply {
                 setBufferAttribute(
                     "aFramePosition",
@@ -118,14 +118,15 @@ class SharpenVideoRenderer(
                 p.use()
                 p.setSamplerTexIdUniform("uVideoTex", textureId, /* texUnitIndex */ 0)
                 p.setFloatsUniform("uTexTransform", transformMatrix)
-                // SGSR1 只需要 uTexelSize（EdgeSharpness 是 shader 内 #define）
-                // unsharp mask 需要 uSharpenAmount（用 setFloatsUniformIfPresent 安全设置）
+                // SGSR1 需要 uViewportInfo = vec4(1/srcW, 1/srcH, srcW, srcH)
+                // unsharp mask 需要 uTexelSize + uSharpenAmount
+                // 用 setFloatsUniformIfPresent 让两种 shader 都兼容
                 if (videoWidth > 0 && videoHeight > 0) {
+                    p.setFloatsUniformIfPresent("uViewportInfo",
+                        floatArrayOf(1f / videoWidth, 1f / videoHeight, videoWidth.toFloat(), videoHeight.toFloat()))
                     val radius = 3.0f
-                    p.setFloatsUniform("uTexelSize", floatArrayOf(radius / videoWidth, radius / videoHeight))
+                    p.setFloatsUniformIfPresent("uTexelSize", floatArrayOf(radius / videoWidth, radius / videoHeight))
                 }
-                // uSharpenAmount 只在 unsharp mask shader 中存在，SGSR1 不需要
-                // setFloatsUniformIfPresent 找不到 uniform 时不报错
                 p.setFloatsUniformIfPresent("uSharpenAmount", floatArrayOf(sharpenAmount))
                 p.bindAttributesAndUniforms()
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
