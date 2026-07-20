@@ -74,8 +74,7 @@ class SharpenVideoRenderer(
     private var ncnnResultBytes: ByteArray? = null
     private var ncnnResultWidth = 0
     private var ncnnResultHeight = 0
-    private var ncnnInputWidth = 0
-    private var ncnnInputHeight = 0
+    private var ncnnHasValidResult = false  // 是否已经有过成功的推理结果
 
     private val sharpenAmount: Float = try {
         val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
@@ -243,10 +242,11 @@ class SharpenVideoRenderer(
     }
 
     /**
-     * 异步 NCNN 路径：
-     * - 如果有上一帧的推理结果 → 上传到纹理 + 渲染
-     * - 如果没有推理在进行 → 提交当前 FBO 到后台线程推理
-     * - 推理中的帧用 SGSR1 渲染（不阻塞 GL 线程）
+     * 异步 NCNN 路径（无闪烁版）：
+     * - 有新推理结果 → 上传 + 渲染超分帧
+     * - 没有新结果但已有旧结果 → 重复渲染上一帧超分结果（不闪）
+     * - 从未有过结果（前几帧）→ 用 SGSR1 过渡（只在最开始）
+     * - 后台没在推理 → 提交当前帧
      */
     private fun drawFrameWithNcnn(): Boolean {
         val sr = ncnnSr
@@ -255,37 +255,24 @@ class SharpenVideoRenderer(
             return false
         }
 
-        // 1. 如果上一帧推理完成，上传结果到纹理
+        // 1. 如果有新推理结果，上传到纹理
         if (ncnnResultReady && ncnnResultBytes != null) {
             ncnnResultReady = false
+            ncnnHasValidResult = true
             try {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
                 GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
                     ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
                     java.nio.ByteBuffer.wrap(ncnnResultBytes))
-
-                // 渲染超分结果到屏幕
-                val view = glSurfaceViewRef?.get()
-                if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
-                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-                blitProgramForNcnn?.let { p ->
-                    p.use()
-                    p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
-                    p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
-                    p.bindAttributesAndUniforms()
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-                }
-                return true
             } catch (e: Exception) {
                 AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
+                ncnnHasValidResult = false
             }
         }
 
-        // 2. 如果没有推理在进行，提交当前帧到后台
+        // 2. 如果后台没在推理，提交当前帧
         if (!ncnnInferInProgress) {
             ncnnInferInProgress = true
-            // 从 FBO 读像素（这一步很快，~1-3ms）
             try {
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
                 GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
@@ -305,8 +292,6 @@ class SharpenVideoRenderer(
                             ncnnResultWidth = w * 2
                             ncnnResultHeight = h * 2
                             ncnnResultReady = true
-                        } else {
-                            AndroidLog.e("SharpenVideoRenderer", "NCNN async infer returned null")
                         }
                     } catch (e: Exception) {
                         AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
@@ -320,9 +305,26 @@ class SharpenVideoRenderer(
             }
         }
 
-        // 3. 推理中或还没结果时，用 SGSR1 渲染当前帧（不阻塞）
-        drawFrameWithSgsr1()
-        return false
+        // 3. 渲染到屏幕
+        if (ncnnHasValidResult) {
+            // 有超分结果（新或旧）→ 渲染 NCNN 纹理（画质一致，不闪）
+            val view = glSurfaceViewRef?.get()
+            if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            blitProgramForNcnn?.let { p ->
+                p.use()
+                p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
+                p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                p.bindAttributesAndUniforms()
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+            return true
+        } else {
+            // 从未有过结果（前几帧）→ SGSR1 过渡
+            drawFrameWithSgsr1()
+            return false
+        }
     }
 
     private fun ensurePixelBuffer(): java.nio.ByteBuffer {
