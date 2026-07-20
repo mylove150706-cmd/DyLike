@@ -5,6 +5,7 @@
 #include <ncnn/gpu.h>
 #include <string>
 #include <cstring>
+#include <mutex>
 
 #define TAG "NcnnSR"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -12,6 +13,7 @@
 
 static ncnn::Net sr_net;
 static bool sr_loaded = false;
+static std::mutex infer_mutex;  // 保护 NCNN 推理的线程安全
 
 extern "C" {
 
@@ -74,6 +76,8 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     jbyteArray inputData, jint width, jint height)
 {
     if (!sr_loaded) return nullptr;
+
+    std::lock_guard<std::mutex> lock(infer_mutex);
 
     try {
     // 1. RGBA → ncnn::Mat (RGB)
