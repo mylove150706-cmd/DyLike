@@ -76,7 +76,7 @@ class SharpenVideoRenderer(
             }
             // 3. 通知外层（外层负责切回主线程把 Surface 给 ExoPlayer）
             onSurfaceTextureReady(surfaceTexture!!)
-            // 4. 编译 shader（Phase 2 用 unsharp mask 锐化）
+            // 4. 编译 shader（unsharp mask - 已验证有效，SGSR1 适配版画面异常已弃用）
             program = GlProgram(
                 context,
                 /* vertexShaderFilePath */ "shaders/video_vertex_es2.glsl",
@@ -118,14 +118,15 @@ class SharpenVideoRenderer(
                 p.use()
                 p.setSamplerTexIdUniform("uVideoTex", textureId, /* texUnitIndex */ 0)
                 p.setFloatsUniform("uTexTransform", transformMatrix)
-                // Phase 2: 设置 unsharp mask 所需的 uTexelSize + uSharpenAmount
-                // 采样半径放大 3 倍：3x3 核覆盖更大的物理范围，锐化效果更明显
-                // （低分辨率视频放大到全屏时，1 像素步长的锐化差异被 bilinear 稀释）
+                // SGSR1 只需要 uTexelSize（EdgeSharpness 是 shader 内 #define）
+                // unsharp mask 需要 uSharpenAmount（用 setFloatsUniformIfPresent 安全设置）
                 if (videoWidth > 0 && videoHeight > 0) {
                     val radius = 3.0f
                     p.setFloatsUniform("uTexelSize", floatArrayOf(radius / videoWidth, radius / videoHeight))
                 }
-                p.setFloatUniform("uSharpenAmount", sharpenAmount)
+                // uSharpenAmount 只在 unsharp mask shader 中存在，SGSR1 不需要
+                // setFloatsUniformIfPresent 找不到 uniform 时不报错
+                p.setFloatsUniformIfPresent("uSharpenAmount", floatArrayOf(sharpenAmount))
                 p.bindAttributesAndUniforms()
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first */ 0, /* count */ 4)
