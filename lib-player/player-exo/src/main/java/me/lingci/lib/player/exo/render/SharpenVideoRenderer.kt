@@ -234,12 +234,14 @@ class SharpenVideoRenderer(
 
     /**
      * Pass 2 (NCNN): RGBA FBO → glReadPixels → NCNN 推理 → glTexImage2D → 屏幕
-     *
-     * 比 SGSR1 慢（~71ms/帧），但画质明显更好（神经网络超分）。
+     * 推理失败时自动 fallback 到 SGSR1，避免黑屏。
      */
-    private fun drawFrameWithNcnn() {
-        val sr = ncnnSr ?: return
-        if (!sr.initialized || fboWidth <= 0 || fboHeight <= 0) return
+    private fun drawFrameWithNcnn(): Boolean {
+        val sr = ncnnSr
+        if (sr == null || !sr.initialized || fboWidth <= 0 || fboHeight <= 0) {
+            drawFrameWithSgsr1()
+            return false
+        }
 
         try {
             // 1. 从 FBO 读像素到 CPU
@@ -251,7 +253,12 @@ class SharpenVideoRenderer(
             pixelBuffer!!.rewind()
             val inputBytes = ByteArray(fboWidth * fboHeight * 4)
             pixelBuffer!!.get(inputBytes)
-            val output = sr.infer(inputBytes, fboWidth, fboHeight) ?: return
+            val output = sr.infer(inputBytes, fboWidth, fboHeight)
+            if (output == null) {
+                AndroidLog.e("SharpenVideoRenderer", "NCNN infer returned null, fallback to SGSR1")
+                drawFrameWithSgsr1()
+                return false
+            }
 
             // 3. 上传超分结果到纹理
             val outWidth = fboWidth * 2
@@ -275,8 +282,11 @@ class SharpenVideoRenderer(
                 p.bindAttributesAndUniforms()
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             }
+            return true
         } catch (e: Exception) {
-            AndroidLog.e("SharpenVideoRenderer", "NCNN path failed: ${e.message}")
+            AndroidLog.e("SharpenVideoRenderer", "NCNN path failed: ${e.message}, fallback to SGSR1")
+            drawFrameWithSgsr1()
+            return false
         }
     }
 
