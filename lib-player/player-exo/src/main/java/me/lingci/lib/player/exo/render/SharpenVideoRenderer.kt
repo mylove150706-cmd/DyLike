@@ -193,8 +193,8 @@ class SharpenVideoRenderer(
             // 渲染优先（每帧都渲染，保证流畅）
             drawNcnnResultToScreen()
 
-            // 异步提交：后台空闲时才读取 + 推理
-            if (!ncnnInferInProgress) {
+            // 异步提交：后台空闲 + 每 30 帧（~1秒1次）才读取，减少 GL 线程阻塞
+            if (!ncnnInferInProgress && frameCount % 30 == 0) {
                 submitNcnnInference()
             }
         } else {
