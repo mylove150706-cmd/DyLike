@@ -63,9 +63,19 @@ class SharpenVideoRenderer(
     // ===== NCNN 混合模式字段 =====
     private var ncnnSr: me.lingci.lib.player.exo.ncnn.NcnnSuperResolution? = null
     private var frameCount = 0
-    private var ncnnOutputTexId = 0  // NCNN 超分结果的 2x 分辨率纹理
-    private var pixelBuffer: java.nio.ByteBuffer? = null  // glReadPixels 的缓冲
-    private var blitProgramForNcnn: GlProgram? = null  // 用于渲染 NCNN 输出纹理的 blit shader
+    private var ncnnOutputTexId = 0
+    private var pixelBuffer: java.nio.ByteBuffer? = null
+    private var blitProgramForNcnn: GlProgram? = null
+
+    // 异步推理：NCNN 在后台线程跑，不阻塞 GL 线程
+    private val ncnnExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var ncnnInferInProgress = false
+    @Volatile private var ncnnResultReady = false
+    private var ncnnResultBytes: ByteArray? = null
+    private var ncnnResultWidth = 0
+    private var ncnnResultHeight = 0
+    private var ncnnInputWidth = 0
+    private var ncnnInputHeight = 0
 
     private val sharpenAmount: Float = try {
         val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
@@ -233,8 +243,10 @@ class SharpenVideoRenderer(
     }
 
     /**
-     * Pass 2 (NCNN): RGBA FBO → glReadPixels → NCNN 推理 → glTexImage2D → 屏幕
-     * 推理失败时自动 fallback 到 SGSR1，避免黑屏。
+     * 异步 NCNN 路径：
+     * - 如果有上一帧的推理结果 → 上传到纹理 + 渲染
+     * - 如果没有推理在进行 → 提交当前 FBO 到后台线程推理
+     * - 推理中的帧用 SGSR1 渲染（不阻塞 GL 线程）
      */
     private fun drawFrameWithNcnn(): Boolean {
         val sr = ncnnSr
@@ -243,51 +255,74 @@ class SharpenVideoRenderer(
             return false
         }
 
-        try {
-            // 1. 从 FBO 读像素到 CPU
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        // 1. 如果上一帧推理完成，上传结果到纹理
+        if (ncnnResultReady && ncnnResultBytes != null) {
+            ncnnResultReady = false
+            try {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                    java.nio.ByteBuffer.wrap(ncnnResultBytes))
 
-            // 2. ByteBuffer → ByteArray → NCNN 推理
-            pixelBuffer!!.rewind()
-            val inputBytes = ByteArray(fboWidth * fboHeight * 4)
-            pixelBuffer!!.get(inputBytes)
-            val output = sr.infer(inputBytes, fboWidth, fboHeight)
-            if (output == null) {
-                AndroidLog.e("SharpenVideoRenderer", "NCNN infer returned null, fallback to SGSR1")
-                drawFrameWithSgsr1()
-                return false
+                // 渲染超分结果到屏幕
+                val view = glSurfaceViewRef?.get()
+                if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+                blitProgramForNcnn?.let { p ->
+                    p.use()
+                    p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
+                    p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                    p.bindAttributesAndUniforms()
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+                }
+                return true
+            } catch (e: Exception) {
+                AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
             }
-
-            // 3. 上传超分结果到纹理
-            val outWidth = fboWidth * 2
-            val outHeight = fboHeight * 2
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                outWidth, outHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
-                java.nio.ByteBuffer.wrap(output))
-
-            // 4. 渲染超分纹理到屏幕
-            val view = glSurfaceViewRef?.get()
-            if (view != null) {
-                GLES20.glViewport(0, 0, view.width, view.height)
-            }
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-            blitProgramForNcnn?.let { p ->
-                p.use()
-                p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
-                p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
-                p.bindAttributesAndUniforms()
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            }
-            return true
-        } catch (e: Exception) {
-            AndroidLog.e("SharpenVideoRenderer", "NCNN path failed: ${e.message}, fallback to SGSR1")
-            drawFrameWithSgsr1()
-            return false
         }
+
+        // 2. 如果没有推理在进行，提交当前帧到后台
+        if (!ncnnInferInProgress) {
+            ncnnInferInProgress = true
+            // 从 FBO 读像素（这一步很快，~1-3ms）
+            try {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+                pixelBuffer!!.rewind()
+                val inputBytes = ByteArray(fboWidth * fboHeight * 4)
+                pixelBuffer!!.get(inputBytes)
+
+                val w = fboWidth
+                val h = fboHeight
+                ncnnExecutor.execute {
+                    try {
+                        val output = sr.infer(inputBytes, w, h)
+                        if (output != null) {
+                            ncnnResultBytes = output
+                            ncnnResultWidth = w * 2
+                            ncnnResultHeight = h * 2
+                            ncnnResultReady = true
+                        } else {
+                            AndroidLog.e("SharpenVideoRenderer", "NCNN async infer returned null")
+                        }
+                    } catch (e: Exception) {
+                        AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
+                    } finally {
+                        ncnnInferInProgress = false
+                    }
+                }
+            } catch (e: Exception) {
+                AndroidLog.e("SharpenVideoRenderer", "glReadPixels for NCNN failed: ${e.message}")
+                ncnnInferInProgress = false
+            }
+        }
+
+        // 3. 推理中或还没结果时，用 SGSR1 渲染当前帧（不阻塞）
+        drawFrameWithSgsr1()
+        return false
     }
 
     private fun ensurePixelBuffer(): java.nio.ByteBuffer {
@@ -349,6 +384,7 @@ class SharpenVideoRenderer(
 
     fun release() {
         try {
+            ncnnExecutor.shutdownNow()
             surfaceTexture?.release()
             blitProgram?.delete()
             sgsrProgram?.delete()
