@@ -138,13 +138,6 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
     private val SP_KEY_LAB_MPV_SEQUENTIAL_READ = "labMpvSequentialRead"
     private val SP_LAB_MPV_SEQUENTIAL_READ_DEFAULT = true
 
-    /**
-     * FSR 画质增强开关的 SP key（跨模块契约同上）。
-     * 由 dy-player/SpUtil.labMpvSuperResolution 写入，这里按字符串读取。
-     */
-    private val SP_KEY_LAB_MPV_SUPER_RESOLUTION = "labMpvSuperResolution"
-    private val SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT = false
-    
     // HDR模式
     enum class HdrMode {
         SDR_MAPPING,       // 稳定优先：映射到 SDR 目标显示。
@@ -658,12 +651,6 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
             // 设置运行时选项（在mpv.init()之后）
             setRuntimeOptions()
 
-            L.d("runtime options set, ready for super-resolution check")
-
-            if (!isMpvInitialized) {
-                applySuperResolutionOnInit()
-            }
-
             /* set hardcoded options */
             mpv.setOptionString("force-window", "no")
             // Keep the embedded player alive after EOF so replay can reuse the instance.
@@ -1113,124 +1100,6 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
         // HDR/色彩空间配置
         setHdrMode(hdrMode)
     }
-
-    /**
-     * FSR 画质增强：开启时挂 AMD FSR shader 到 LUMA hook（EASU 升采样 + RCAS 锐化），
-     * 关闭时清空。可在播放中调用，pause 状态下会强制 seek 重渲染当前帧。
-     *
-     * 详见 spec：docs/superpowers/specs/2026-07-20-mpv-fsr-super-resolution-design.md
-     *
-     * ⚠️ 跨模块契约：开关 SP 键为 `labMpvSuperResolution`，由 dy-player/SpUtil 定义。
-     * 这里通过字符串字面量读取。改名需同步两边。
-     */
-    fun setSuperResolutionEnabled(enabled: Boolean) {
-        if (!isMpvInitialized || isNativeDestroyed) return
-        try {
-            if (enabled) {
-                val paths = ensureShadersCopied(superResolutionShaderNames)
-                if (paths.isEmpty()) {
-                    L.e("Super-resolution: shader files missing, cannot enable")
-                    return
-                }
-                for (path in paths) {
-                    mpv.command("change-list", "glsl-shaders", "add", path)
-                }
-                L.d("Super-resolution: enabled (${paths.size} shaders)")
-            } else {
-                mpv.command("set", "glsl-shaders", "")
-                L.d("Super-resolution: disabled")
-            }
-            // 诊断：把 mpv 当前 shader + 渲染参数 dump 到文件（华为 logcat 屏蔽时的替代方案）
-            dumpSuperResDiagnostics()
-            forceRerender()
-            // seek 后再 dump 一次，看 forceRerender 后是否真的重渲染了
-            Thread.sleep(500)
-            dumpSuperResDiagnostics()
-        } catch (e: Exception) {
-            L.e("setSuperResolutionEnabled failed: ${e.message}")
-        }
-    }
-
-    /**
-     * 诊断：把 mpv 当前 shader + 渲染参数 dump 到 filesDir/super_res_diag.log。
-     * 用于排查 FSR 是否真的挂上、WHEN 条件是否触发。
-     */
-    private fun dumpSuperResDiagnostics() {
-        try {
-            val logFile = java.io.File(appContext.filesDir, "super_res_diag.log")
-            val sb = StringBuilder()
-            sb.append("=== ${java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())} ===\n")
-            try {
-                sb.append("vo = ${mpv.getPropertyString("vo")}\n")
-                sb.append("hwdec = ${mpv.getPropertyString("hwdec")}\n")
-                sb.append("filename = ${mpv.getPropertyString("filename")}\n")
-                sb.append("width = ${mpv.getPropertyInt("width")}\n")
-                sb.append("height = ${mpv.getPropertyInt("height")}\n")
-                sb.append("dwidth = ${mpv.getPropertyInt("dwidth")}\n")
-                sb.append("dheight = ${mpv.getPropertyInt("dheight")}\n")
-                sb.append("video-params = ${mpv.getPropertyNode("video-params")}\n")
-                sb.append("video-out-params = ${mpv.getPropertyNode("video-out-params")}\n")
-                sb.append("glsl-shaders = ${mpv.getPropertyString("glsl-shaders")}\n")
-                sb.append("scale = ${mpv.getPropertyString("scale")}\n")
-                sb.append("cscale = ${mpv.getPropertyString("cscale")}\n")
-                sb.append("dscale = ${mpv.getPropertyString("dscale")}\n")
-                sb.append("android-surface-size = ${mpv.getPropertyString("android-surface-size")}\n")
-                sb.append("video-zoom = ${mpv.getPropertyDouble("video-zoom")}\n")
-                sb.append("video-unscaled = ${mpv.getPropertyString("video-unscaled")}\n")
-                sb.append("keepaspect = ${mpv.getPropertyString("keepaspect")}\n")
-                sb.append("panscan = ${mpv.getPropertyString("panscan")}\n")
-            } catch (e: Exception) {
-                sb.append("query failed: ${e.message}\n")
-            }
-            logFile.appendText(sb.toString())
-        } catch (_: Exception) {}
-    }
-
-    /**
-     * 初始化时按 SP 决定要不要默认挂上 FSR。
-     * 保证切到下个视频/重启 App 后开关状态持续生效。
-     */
-    private fun applySuperResolutionOnInit() {
-        val sp = PreferenceManager.getDefaultSharedPreferences(appContext)
-        val enabled = sp.getBoolean(
-            SP_KEY_LAB_MPV_SUPER_RESOLUTION,
-            SP_LAB_MPV_SUPER_RESOLUTION_DEFAULT
-        )
-        if (enabled) setSuperResolutionEnabled(true)
-    }
-
-    /**
-     * 从 assets 拷贝 shader 文件到 filesDir/shaders/（若已存在且非空则跳过）。
-     * 返回拷贝后的绝对路径列表。
-     */
-    private fun ensureShadersCopied(names: List<String>): List<String> {
-        val outDir = java.io.File(appContext.filesDir, "shaders")
-        if (!outDir.exists()) outDir.mkdirs()
-        val paths = ArrayList<String>()
-        for (name in names) {
-            val out = java.io.File(outDir, name)
-            if (!out.exists() || out.length() == 0L) {
-                appContext.assets.open("shaders/$name").use { i ->
-                    java.io.FileOutputStream(out).use { o -> i.copyTo(o) }
-                }
-            }
-            if (out.exists() && out.length() > 0L) paths.add(out.absolutePath)
-        }
-        return paths
-    }
-
-    /**
-     * 在 pause 状态下强制 mpv 重渲染当前帧（seek 到当前位置）。
-     * 改完 shader 后 mpv 不会自动重绘 paused frame，需要主动触发。
-     */
-    private fun forceRerender() {
-        try {
-            val pos = mpv.getPropertyDouble("time-pos") ?: return
-            mpv.command("seek", pos.toString(), "absolute", "exact")
-        } catch (_: Exception) {}
-    }
-
-    private val superResolutionShaderNames = listOf("CAS.glsl")
 
     override fun setOptions() {
         if (isReleasing || isReleased || isNativeDestroyed) return
