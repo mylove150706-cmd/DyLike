@@ -270,27 +270,32 @@ class SharpenVideoRenderer(
             }
         }
 
-        // 2. 如果后台没在推理，提交当前帧
+        // 2. 如果后台没在推理，提交当前帧（缩放到 640×360 后传给 NCNN）
         if (!ncnnInferInProgress) {
             ncnnInferInProgress = true
             try {
+                // 从 FBO 读原始帧
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
                 GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
                 pixelBuffer!!.rewind()
-                val inputBytes = ByteArray(fboWidth * fboHeight * 4)
-                pixelBuffer!!.get(inputBytes)
+                val fullBytes = ByteArray(fboWidth * fboHeight * 4)
+                pixelBuffer!!.get(fullBytes)
 
-                val w = fboWidth
-                val h = fboHeight
+                // 缩放到 640×360（在 CPU 线程做，不占 GL 线程）
+                val targetW = 640
+                val targetH = 360
+                val scaledBytes = scaleDownRgba(fullBytes, fboWidth, fboHeight, targetW, targetH)
+
                 ncnnExecutor.execute {
                     try {
-                        val output = sr.infer(inputBytes, w, h)
-                        if (output != null) {
-                            ncnnResultBytes = output
-                            ncnnResultWidth = w * 2
-                            ncnnResultHeight = h * 2
+                        // NCNN 超分：640×360 → 1280×720
+                        val ncnnOut = sr.infer(scaledBytes, targetW, targetH)
+                        if (ncnnOut != null) {
+                            ncnnResultBytes = ncnnOut
+                            ncnnResultWidth = targetW * 2  // 1280
+                            ncnnResultHeight = targetH * 2 // 720
                             ncnnResultReady = true
                         }
                     } catch (e: Exception) {
@@ -334,6 +339,29 @@ class SharpenVideoRenderer(
         }
         pixelBuffer!!.rewind()
         return pixelBuffer!!
+    }
+
+    /**
+     * 简单的最近邻缩放 RGBA byte[]。
+     * 在 CPU 后台线程调用，不占 GL 线程。
+     */
+    private fun scaleDownRgba(src: ByteArray, srcW: Int, srcH: Int, dstW: Int, dstH: Int): ByteArray {
+        val dst = ByteArray(dstW * dstH * 4)
+        val xRatio = srcW.toFloat() / dstW
+        val yRatio = srcH.toFloat() / dstH
+        for (dy in 0 until dstH) {
+            val sy = (dy * yRatio).toInt().coerceIn(0, srcH - 1)
+            for (dx in 0 until dstW) {
+                val sx = (dx * xRatio).toInt().coerceIn(0, srcW - 1)
+                val srcIdx = (sy * srcW + sx) * 4
+                val dstIdx = (dy * dstW + dx) * 4
+                dst[dstIdx]     = src[srcIdx]
+                dst[dstIdx + 1] = src[srcIdx + 1]
+                dst[dstIdx + 2] = src[srcIdx + 2]
+                dst[dstIdx + 3] = src[srcIdx + 3]
+            }
+        }
+        return dst
     }
 
     /** 创建或调整 RGBA FBO 尺寸以匹配视频分辨率。 */
