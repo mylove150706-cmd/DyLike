@@ -72,11 +72,17 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     std::lock_guard<std::mutex> lock(infer_mutex);
 
     try {
-    // 1. RGBA → ncnn::Mat (RGB)
+    // 1. RGBA → ncnn::Mat (RGB) + 归一化到 [0,1]
+    // Real-ESRGAN 模型期望 [0,1] float32 输入，ncnn from_pixels 输出 [0,255]
+    // 需要：value * (1/255) → 用 norm 参数实现
     jbyte* in = env->GetByteArrayElements(inputData, nullptr);
     ncnn::Mat in_mat = ncnn::Mat::from_pixels(
         (const unsigned char*)in, ncnn::Mat::PIXEL_RGBA2RGB, width, height);
     env->ReleaseByteArrayElements(inputData, in, JNI_ABORT);
+
+    // 归一化：x = (x - 0) * (1/255) → [0,1]
+    const float norm_vals[3] = { 1.f / 255.f, 1.f / 255.f, 1.f / 255.f };
+    in_mat.substract_mean_normalize(nullptr, norm_vals);
 
     // 2. NCNN 推理
     ncnn::Extractor ex = sr_net.create_extractor();
@@ -111,6 +117,10 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     memcpy(header, &outW, 4);
     memcpy(header + 4, &outH, 4);
     env->SetByteArrayRegion(result, 0, 8, (jbyte*)header);
+
+    // 反归一化：[0,1] → [0,255]，然后转 RGBA
+    const float denorm_vals[3] = { 255.f, 255.f, 255.f };
+    out_mat.substract_mean_normalize(nullptr, denorm_vals);
 
     // 转换并写入像素
     unsigned char* rgbaBuf = new unsigned char[pixelSize];
