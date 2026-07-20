@@ -118,6 +118,8 @@
     <string name="hint_lab_mpv_sequential_read_desc">禁用 ffmpeg 对 MP4 的 demuxer-level 交错读取,缓解结构不良的远程视频拖动卡顿</string>
     <string name="hint_lab_mpv_super_resolution">画质增强</string>
     <string name="hint_lab_mpv_super_resolution_desc">使用锐化算法提升视频清晰度（仅 ExoPlayer 内核）</string>
+    <string name="hint_super_resolution_strength_label">锐化强度</string>
+    <string name="hint_super_resolution_strength_range">（0.0~3.0，重启播放生效）</string>
     <string name="hint_lab_long_video_portrait">长视频竖屏播放</string>
     <string name="hint_lab_long_video_portrait_desc">开启后长视频默认进入竖屏播放</string>
     <string name="hint_backup_data">备份数据</string>

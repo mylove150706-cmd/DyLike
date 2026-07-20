@@ -32,12 +32,28 @@ class SharpenVideoRenderer(
     private val onSurfaceTextureReady: (SurfaceTexture) -> Unit
 ) : GLSurfaceView.Renderer {
 
+    companion object {
+        private const val SP_KEY_STRENGTH = "labSuperResolutionStrength"
+        private const val SP_STRENGTH_DEFAULT = 1.0f
+        private const val STRENGTH_MIN = 0.0f
+        private const val STRENGTH_MAX = 3.0f
+    }
+
     private val frameAvailable = AtomicBoolean(false)
     private val transformMatrix = FloatArray(16)
     private var textureId = 0
     private var surfaceTexture: SurfaceTexture? = null
     private var program: GlProgram? = null
     private var glSurfaceViewRef: WeakReference<GLSurfaceView>? = null
+
+    /** 锐化强度，构造时从 SP 读取一次（运行时切换会重建 renderer 才能改）。 */
+    private val sharpenAmount: Float = try {
+        val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        val raw = sp.getFloat(SP_KEY_STRENGTH, SP_STRENGTH_DEFAULT)
+        raw.coerceIn(STRENGTH_MIN, STRENGTH_MAX)
+    } catch (_: Throwable) {
+        SP_STRENGTH_DEFAULT
+    }
     private var videoWidth = 0
     private var videoHeight = 0
 
@@ -106,7 +122,7 @@ class SharpenVideoRenderer(
                 if (videoWidth > 0 && videoHeight > 0) {
                     p.setFloatsUniform("uTexelSize", floatArrayOf(1f / videoWidth, 1f / videoHeight))
                 }
-                p.setFloatUniform("uSharpenAmount", 1.0f)
+                p.setFloatUniform("uSharpenAmount", sharpenAmount)
                 p.bindAttributesAndUniforms()
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first */ 0, /* count */ 4)

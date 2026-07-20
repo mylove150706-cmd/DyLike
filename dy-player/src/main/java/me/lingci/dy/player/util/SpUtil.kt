@@ -194,6 +194,15 @@ open class SpUtil(context: Context) : SpBase(context) {
      */
     var labMpvSuperResolution by SPManager.boolean(false)
 
+    /**
+     * 画质增强锐化强度，0.0-3.0，默认 1.0。
+     * 0 = 关闭锐化（但仍走 GlRenderView）；3 = 极强（可能过锐/噪点放大）。
+     * 1.0 = 温和；2.0 = 明显锐利。
+     *
+     * ⚠️ 跨模块约定：此 key 由 lib-player/player-exo/SharpenVideoRenderer 在构造时读取。
+     */
+    var labSuperResolutionStrength by SPManager.float(1.0f)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 

@@ -61,15 +61,32 @@ class LabSettingsFragment : BaseFragment() {
         binding.swLabMpvSuperResolution.setOnClickListener {
             val on = binding.swLabMpvSuperResolution.isChecked
             spUtil.labMpvSuperResolution = on
-            // 立即对当前 MPV 实例生效（若不在 MPV 内核则忽略，下次切到 MPV 时由 init 应用）
+            // 立即对当前 ExoPlayer 实例生效（运行时切换 render view 会触发 player 重播）
             val action = if (on) LongVideoActivity.ACTION_SUPER_RESOLUTION_ON
                          else LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF
             requireContext().sendBroadcast(Intent(action))
             Toast.makeText(
                 requireContext(),
-                if (on) "已开启 MPV 画质增强" else "已关闭 MPV 画质增强",
+                if (on) "已开启画质增强" else "已关闭画质增强",
                 Toast.LENGTH_SHORT
             ).show()
+        }
+        // 锐化强度输入框：0.0~3.0，默认 1.0；失焦时写 SP
+        binding.etSuperResolutionStrength.setText(spUtil.labSuperResolutionStrength.toString())
+        binding.etSuperResolutionStrength.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                val raw = binding.etSuperResolutionStrength.text.toString().trim().toFloatOrNull()
+                val clamped = (raw ?: 1.0f).coerceIn(0.0f, 3.0f)
+                binding.etSuperResolutionStrength.setText(clamped.toString())
+                if (spUtil.labSuperResolutionStrength != clamped) {
+                    spUtil.labSuperResolutionStrength = clamped
+                    Toast.makeText(
+                        requireContext(),
+                        "锐化强度已更新为 $clamped（重播以生效）",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
         }
         binding.swDebugMode.isChecked = spUtil.debugMode
         binding.swDebugMode.setOnClickListener {
