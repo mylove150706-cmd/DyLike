@@ -27,14 +27,13 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
     const char* param = env->GetStringUTFChars(paramPath, nullptr);
     const char* bin   = env->GetStringUTFChars(binPath,   nullptr);
 
-    // 单线程 CPU 推理（多线程 OpenMP 在部分设备上会崩溃）
     sr_net.opt.num_threads = 1;
     sr_net.opt.use_fp16_packed     = true;
     sr_net.opt.use_winograd_convolution = true;
     sr_net.opt.use_sgemm_convolution = true;
     sr_net.opt.use_vulkan_compute = false;
 
-    LOGI("Using single-thread CPU inference");
+    LOGI("Using single-thread CPU inference with NDK OpenMP");
 
     AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
     if (!mgr) {
