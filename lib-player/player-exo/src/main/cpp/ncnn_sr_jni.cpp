@@ -5,6 +5,7 @@
 #include <ncnn/gpu.h>
 #include <string>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 
 #define TAG "NcnnSR"
@@ -23,6 +24,12 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
     jstring paramPath, jstring binPath)
 {
     if (sr_loaded) return JNI_TRUE;
+
+    // 禁用 OpenMP affinity（荣耀设备上 __kmp_affinity_initialize 会崩溃）
+    setenv("KMP_AFFINITY", "disabled", 1);
+    setenv("OMP_PROC_BIND", "false", 1);
+    setenv("KMP_TOPOLOGY_METHOD", "0", 1);
+    setenv("OMP_WAIT_POLICY", "PASSIVE", 1);
 
     const char* param = env->GetStringUTFChars(paramPath, nullptr);
     const char* bin   = env->GetStringUTFChars(binPath,   nullptr);
