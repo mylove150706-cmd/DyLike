@@ -67,23 +67,15 @@ class SharpenVideoRenderer(
     private var pixelBuffer: java.nio.ByteBuffer? = null
     private var blitProgramForNcnn: GlProgram? = null
 
-    // 异步推理：双缓冲 + 频率限制
+    // 异步推理：简单可靠版
     private val ncnnExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile private var ncnnInferInProgress = false
     @Volatile private var ncnnResultReady = false
-    // 双缓冲：A 用于当前显示，B 用于后台写入，完成后交换
-    private val ncnnBufA = java.nio.ByteBuffer.allocateDirect(1280 * 720 * 4)
-    private val ncnnBufB = java.nio.ByteBuffer.allocateDirect(1280 * 720 * 4)
-    private var ncnnDisplayBuf: java.nio.ByteBuffer = ncnnBufA
-    private var ncnnWorkBuf: java.nio.ByteBuffer = ncnnBufB
+    @Volatile private var ncnnResultBytes: ByteArray? = null
     @Volatile private var ncnnResultWidth = 0
     @Volatile private var ncnnResultHeight = 0
     private var ncnnHasValidResult = false
-    // 频率限制：每 N 帧推理一次（避免 GPU 过载导致黑屏）
-    private val NCNN_INFER_INTERVAL = 2  // 每 2 帧推理 1 次（~15fps 超分）
-    // 缩放缓冲复用
-    private val scaledBuf = java.nio.ByteBuffer.allocateDirect(640 * 360 * 4)
-    private val fullBuf = java.nio.ByteBuffer.allocateDirect(1920 * 1080 * 4)
+    private val NCNN_INFER_INTERVAL = 2
 
     private val sharpenAmount: Float = try {
         val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
@@ -265,73 +257,45 @@ class SharpenVideoRenderer(
         }
 
         // 1. 如果有新推理结果，上传到纹理
-        if (ncnnResultReady) {
+        if (ncnnResultReady && ncnnResultBytes != null) {
             ncnnResultReady = false
             ncnnHasValidResult = true
-            // 交换缓冲：后台写完的 ncnnWorkBuf 变成 ncnnDisplayBuf 用于显示
-            synchronized(this) {
-                val tmp = ncnnDisplayBuf
-                ncnnDisplayBuf = ncnnWorkBuf
-                ncnnWorkBuf = tmp
-            }
             try {
-                ncnnDisplayBuf.rewind()
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
                 GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
                     ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
-                    ncnnDisplayBuf)
+                    java.nio.ByteBuffer.wrap(ncnnResultBytes))
             } catch (e: Exception) {
                 AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
             }
         }
 
-        // 2. 按频率提交推理（每 NCNN_INFER_INTERVAL 帧推理 1 次）
+        // 2. 按频率提交推理
         if (!ncnnInferInProgress && frameCount % NCNN_INFER_INTERVAL == 0) {
             ncnnInferInProgress = true
             try {
-                // 从 FBO 读原始帧到复用 buffer
-                val readSize = fboWidth * fboHeight * 4
-                if (fullBuf.capacity() < readSize) {
-                    // 视频分辨率超出预期，fallback
-                    ncnnInferInProgress = false
-                    drawFrameWithSgsr1()
-                    return false
-                }
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-                fullBuf.rewind()
-                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, fullBuf)
+                GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-                // 复制到 ByteArray 给后台线程（不持有 direct buffer 引用）
-                fullBuf.rewind()
-                val fullBytes = ByteArray(readSize)
-                fullBuf.get(fullBytes)
+                pixelBuffer!!.rewind()
+                val fullBytes = ByteArray(fboWidth * fboHeight * 4)
+                pixelBuffer!!.get(fullBytes)
 
                 val targetW = 640
                 val targetH = 360
                 val fw = fboWidth
                 val fh = fboHeight
-                val workBuf = ncnnWorkBuf  // 捕获当前 work buffer 引用
 
                 ncnnExecutor.execute {
                     try {
                         val scaledBytes = scaleDownRgba(fullBytes, fw, fh, targetW, targetH)
                         val ncnnOut = sr.infer(scaledBytes, targetW, targetH)
                         if (ncnnOut != null) {
-                            val pixels = ncnnOut.first
-                            val ow = ncnnOut.second
-                            val oh = ncnnOut.third
-                            val expectedSize = ow * oh * 4
-                            if (pixels.size == expectedSize && expectedSize <= workBuf.capacity()) {
-                                synchronized(this@SharpenVideoRenderer) {
-                                    workBuf.clear()
-                                    workBuf.put(pixels)
-                                    workBuf.flip()
-                                }
-                                ncnnResultWidth = ow
-                                ncnnResultHeight = oh
-                                ncnnResultReady = true
-                            }
+                            ncnnResultBytes = ncnnOut.first
+                            ncnnResultWidth = ncnnOut.second
+                            ncnnResultHeight = ncnnOut.third
+                            ncnnResultReady = true
                         }
                     } catch (e: Exception) {
                         AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
