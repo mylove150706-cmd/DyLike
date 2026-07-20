@@ -39,10 +39,11 @@ find_library(log-lib log)
 find_library(android-lib android)
 find_library(vulkan-lib vulkan)
 
-# OpenMP（NCNN CPU 后端依赖）
-find_package(OpenMP REQUIRED)
+# 不用系统 OpenMP（libomp 在荣耀设备上 SIGSEGV）
+# 提供 stub 实现替代 libomp
+add_library(omp_stub STATIC omp_stub.cpp)
 
-# 链接顺序很重要：ncnn 依赖 glslang 系列
+# 链接顺序：ncnn 依赖 glslang 系列 + omp_stub 替代 libomp
 target_link_libraries(ncnn-sr
     libncnn
     libSPIRV
@@ -51,7 +52,7 @@ target_link_libraries(ncnn-sr
     libGenericCodeGen
     libOSDependent
     libglslang-default-resource-limits
-    OpenMP::OpenMP_CXX
+    omp_stub
     ${log-lib}
     ${android-lib}
     ${vulkan-lib}
