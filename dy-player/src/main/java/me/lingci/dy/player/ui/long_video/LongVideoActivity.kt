@@ -212,28 +212,20 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
 
-    // 超分开关广播接收器：收到 ON/OFF 时调用 ExoPlayer 的 setSuperResolutionEnabled。
+    // 超分开关广播接收器：收到 ON/OFF 时写 SP 并重播当前视频以应用新的 render view。
+    // 注意：GLSurfaceView 不能热切换，必须重建 player。
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val player = videoView.getCurrentPlayer() as? CustomExoMediaPlayer ?: return
-            when (intent.action) {
-                ACTION_SUPER_RESOLUTION_ON -> {
-                    player.setSuperResolutionEnabled(true)
-                    android.widget.Toast.makeText(
-                        this@LongVideoActivity,
-                        "画质增强：已开启",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-                ACTION_SUPER_RESOLUTION_OFF -> {
-                    player.setSuperResolutionEnabled(false)
-                    android.widget.Toast.makeText(
-                        this@LongVideoActivity,
-                        "画质增强：已关闭",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
+            val on = intent.action == ACTION_SUPER_RESOLUTION_ON
+            if (spUtil.labMpvSuperResolution == on) return  // 状态没变，跳过
+            spUtil.labMpvSuperResolution = on
+            android.widget.Toast.makeText(
+                this@LongVideoActivity,
+                if (on) "画质增强：已开启（重播以生效）" else "画质增强：已关闭（重播以生效）",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            // 重播当前视频，触发 player + render view 重建
+            startPlay(mCurPos)
         }
     }
     private var isSuperResReceiverRegistered = false
@@ -406,7 +398,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         // Apply the generic render preference first. MPV is allowed to override it below because
         // MPV playback requires its own Surface-backed render view.
         applyConfiguredRenderFactory()
-        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender)
+        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
         videoView.setOnPlayerInitializedListener { player ->
             // BaseVideoView may recreate the backend; reattach both Exo-only settings and common
             // capability listeners for every new concrete player instance.
@@ -500,7 +492,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private fun applyPlaybackCoreFor(videoBean: VideoData, playUrl: String) {
         applyConfiguredRenderFactory()
         val core = if (isSmbVideo(videoBean, playUrl)) DyPlayerCore.EXO else spUtil.dyPlayerCore
-        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender)
+        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
     }
 
     private fun applyConfiguredRenderFactory() {

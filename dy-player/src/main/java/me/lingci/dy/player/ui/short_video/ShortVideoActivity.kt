@@ -143,16 +143,18 @@ class ShortVideoActivity : BaseActivity() {
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
 
-    // 超分开关广播接收器（同 LongVideoActivity，让短视频也能切换锐化效果）
+    // 超分开关广播接收器：仅写 SP，重播生效由短视频列表自然触发（滑到下一个再滑回来）。
+    // 短视频列表架构复杂，运行时强切 render view 风险大；简化为"下次播放时生效"。
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            val player = mVideoView.getCurrentPlayer() as? me.lingci.lib.player.exo.CustomExoMediaPlayer ?: return
-            when (intent.action) {
-                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_ON ->
-                    player.setSuperResolutionEnabled(true)
-                me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF ->
-                    player.setSuperResolutionEnabled(false)
-            }
+            val on = intent.action == me.lingci.dy.player.ui.long_video.LongVideoActivity.ACTION_SUPER_RESOLUTION_ON
+            if (spUtil.labMpvSuperResolution == on) return
+            spUtil.labMpvSuperResolution = on
+            android.widget.Toast.makeText(
+                this@ShortVideoActivity,
+                if (on) "画质增强：已开启（切换视频后生效）" else "画质增强：已关闭（切换视频后生效）",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
         }
     }
     private var isSuperResReceiverRegistered = false
@@ -588,7 +590,7 @@ class ShortVideoActivity : BaseActivity() {
     private fun applyPlaybackCoreFor(videoBean: VideoData) {
         if (isSmbVideo(videoBean)) {
             applyShortVideoRenderFactory()
-            DyPlayerCoreRegistry.applyCore(mVideoView, DyPlayerCore.EXO, spUtil.labMpvSpecialRender)
+            DyPlayerCoreRegistry.applyCore(mVideoView, DyPlayerCore.EXO, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
             if (!spUtil.sortRender) {
                 mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
             }
@@ -603,7 +605,7 @@ class ShortVideoActivity : BaseActivity() {
             if (!spUtil.labMpvSpecialRender) {
                 mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
             }
-            DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender)
+            DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
             // Do not replace MPV's required Surface renderer with the short-video renderer. MPV keeps
             // default scaling here until fast-swipe Surface reuse is validated across devices.
             //mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_CENTER_CROP);
@@ -613,7 +615,7 @@ class ShortVideoActivity : BaseActivity() {
         if (spUtil.sortRender) {
             applyShortVideoRenderFactory()
         }
-        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender)
+        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
         if (!spUtil.sortRender) {
             mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
             mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
