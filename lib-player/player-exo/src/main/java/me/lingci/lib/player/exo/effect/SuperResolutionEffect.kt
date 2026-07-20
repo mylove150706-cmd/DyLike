@@ -25,6 +25,7 @@ class SuperResolutionEffect(
 ) : GlEffect {
 
     override fun toGlShaderProgram(context: Context, useDebug: Boolean): GlShaderProgram {
+        android.util.Log.e("SuperResDebug", "SuperResolutionEffect.toGlShaderProgram() called - effect instantiated!")
         return SuperResolutionProgram(context)
     }
 }
