@@ -190,12 +190,11 @@ class SharpenVideoRenderer(
         blitOesToFbo()
 
         if (useNcnn && ncnnSr?.initialized == true && fboId != 0) {
-            // NCNN 模式：先渲染超分结果到屏幕，再异步提交新帧
-            // 渲染优先：确保画面流畅，NCNN 结果延迟 1-2 帧可接受
+            // 渲染优先（每帧都渲染，保证流畅）
             drawNcnnResultToScreen()
 
-            // 异步提交：只在后台空闲时才做 glReadPixels + NCNN
-            if (!ncnnInferInProgress) {
+            // 异步提交：后台空闲时 + 每 10 帧才读取一次（减少 glReadPixels 阻塞）
+            if (!ncnnInferInProgress && frameCount % 10 == 0) {
                 submitNcnnInference()
             }
         } else {
