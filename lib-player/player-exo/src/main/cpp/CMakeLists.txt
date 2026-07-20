@@ -3,27 +3,19 @@ project("ncnn-sr")
 
 # 只编译有 NCNN 库的 ABI
 if(NOT ANDROID_ABI STREQUAL "arm64-v8a" AND NOT ANDROID_ABI STREQUAL "x86_64")
-    # 对没有 NCNN 库的 ABI（如 armeabi-v7a），创建空的占位 .so
-    # 这样不会阻止其他 ABI 的 APK 构建
     add_library(ncnn-sr SHARED ncnn_sr_stub.cpp)
     return()
 endif()
 
 set(NCNN_DIR "${CMAKE_SOURCE_DIR}/../jni/ncnn/${ANDROID_ABI}")
-
-# NCNN 头文件
 include_directories(${NCNN_DIR}/include)
 
-# 辅助函数：导入静态库
 function(import_static_lib lib_name lib_path)
     add_library(${lib_name} STATIC IMPORTED)
     set_target_properties(${lib_name} PROPERTIES IMPORTED_LOCATION ${lib_path})
 endfunction()
 
-# NCNN 核心库
 import_static_lib(libncnn ${NCNN_DIR}/lib/libncnn.a)
-
-# glslang 系列（NCNN Vulkan 后端依赖）
 import_static_lib(libSPIRV ${NCNN_DIR}/lib/libSPIRV.a)
 import_static_lib(libglslang ${NCNN_DIR}/lib/libglslang.a)
 import_static_lib(libMachineIndependent ${NCNN_DIR}/lib/libMachineIndependent.a)
@@ -31,18 +23,23 @@ import_static_lib(libGenericCodeGen ${NCNN_DIR}/lib/libGenericCodeGen.a)
 import_static_lib(libOSDependent ${NCNN_DIR}/lib/libOSDependent.a)
 import_static_lib(libglslang-default-resource-limits ${NCNN_DIR}/lib/libglslang-default-resource-limits.a)
 
-# 我们的 JNI 库
+# 静态链接 OpenMP runtime（避免 libomp.so 运行时冲突/崩溃）
+set(CLANG_LIB_DIR "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/lib/clang/19/lib/linux")
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    import_static_lib(libomp_static ${CLANG_LIB_DIR}/aarch64/libomp.a)
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    import_static_lib(libomp_static ${CLANG_LIB_DIR}/x86_64/libomp.a)
+endif()
+
 add_library(ncnn-sr SHARED ncnn_sr_jni.cpp)
 
-# 系统库
+# 用 -fopenmp 编译（生成 OpenMP 调用），但静态链接 libomp.a
+target_compile_options(ncnn-sr PRIVATE -fopenmp)
+
 find_library(log-lib log)
 find_library(android-lib android)
 find_library(vulkan-lib vulkan)
 
-# 链接 NDK 自带的 OpenMP（不用预编译包的 libomp）
-find_package(OpenMP REQUIRED)
-
-# 链接顺序：ncnn 依赖 glslang 系列 + OpenMP
 target_link_libraries(ncnn-sr
     libncnn
     libSPIRV
@@ -51,11 +48,14 @@ target_link_libraries(ncnn-sr
     libGenericCodeGen
     libOSDependent
     libglslang-default-resource-limits
-    OpenMP::OpenMP_CXX
+    libomp_static
     ${log-lib}
     ${android-lib}
     ${vulkan-lib}
 )
+
+# 防止链接器生成对 libomp.so 的动态依赖
+target_link_options(ncnn-sr PRIVATE -Wl,-Bstatic -lomp -Wl,-Bdynamic)
 
 set_target_properties(ncnn-sr PROPERTIES CXX_STANDARD 14)
 target_compile_options(ncnn-sr PRIVATE -fexceptions -frtti)
