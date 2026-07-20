@@ -44,19 +44,24 @@ class NcnnSuperResolution {
 
     /**
      * 对一帧 RGBA 数据做 2x 超分。
-     *
-     * @param input RGBA byte array (width * height * 4)
-     * @param width 输入宽度
-     * @param height 输入高度
-     * @return 超分后的 RGBA byte array (width*2 * height*2 * 4)，或 null 如果失败
+     * 返回 Triple<数据, 宽, 高>，或 null 如果失败。
      */
-    fun infer(input: ByteArray, width: Int, height: Int): ByteArray? {
+    fun infer(input: ByteArray, width: Int, height: Int): Triple<ByteArray, Int, Int>? {
         if (!initialized) return null
-        val outWidth = width * 2
-        val outHeight = height * 2
-        val output = ByteArray(outWidth * outHeight * 4)
-        val ok = nativeInfer(input, width, height, output, outWidth, outHeight)
-        return if (ok) output else null
+        return try {
+            val result = nativeInferAlloc(input, width, height)
+            if (result != null) {
+                // result = [outW, outH, outW*outH*4 bytes...]
+                val outW = result[0]
+                val outH = result[1]
+                val pixels = ByteArray(result.size - 8)
+                System.arraycopy(result, 8, pixels, 0, pixels.size)
+                Triple(pixels, outW.toInt(), outH.toInt())
+            } else null
+        } catch (e: Throwable) {
+            Log.e(TAG, "infer failed: ${e.message}")
+            null
+        }
     }
 
     fun release() {
@@ -72,10 +77,14 @@ class NcnnSuperResolution {
         binPath: String
     ): Boolean
 
-    private external fun nativeInfer(
-        input: ByteArray, width: Int, height: Int,
-        output: ByteArray, outWidth: Int, outHeight: Int
-    ): Boolean
+    /**
+     * 推理并返回结果。JNI 内部分配正确大小的 buffer。
+     * 返回 ByteArray 格式：[outW(4bytes)][outH(4bytes)][RGBA pixels...]
+     * 或 null 如果失败。
+     */
+    private external fun nativeInferAlloc(
+        input: ByteArray, width: Int, height: Int
+    ): ByteArray?
 
     private external fun nativeRelease()
 }

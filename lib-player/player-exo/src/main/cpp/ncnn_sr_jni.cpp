@@ -4,6 +4,7 @@
 #include <ncnn/net.h>
 #include <ncnn/gpu.h>
 #include <string>
+#include <cstring>
 
 #define TAG "NcnnSR"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
@@ -30,8 +31,6 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
     sr_net.opt.use_fp16_arithmetic = true;
     sr_net.opt.use_winograd_convolution = true;
     sr_net.opt.use_sgemm_convolution = true;
-    sr_net.opt.use_int8_storage     = true;
-    sr_net.opt.use_int8_arithmetic  = true;
 
 #if NCNN_VULKAN
     if (ncnn::get_gpu_count() > 0) {
@@ -66,16 +65,15 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
 }
 
 /**
- * 标准推理：RGBA 输入 → NCNN 2x 超分 → RGBA 输出。
- * 完整 RGB 三通道超分，无 Y/UV 拆分（简单可靠）。
+ * 推理。JNI 内部分配正确大小的 buffer。
+ * 返回 ByteArray: [outW(int32)][outH(int32)][RGBA pixels...]
  */
-JNIEXPORT jboolean JNICALL
-Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInfer(
+JNIEXPORT jbyteArray JNICALL
+Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     JNIEnv* env, jobject,
-    jbyteArray inputData, jint width, jint height,
-    jbyteArray outputData, jint outWidth, jint outHeight)
+    jbyteArray inputData, jint width, jint height)
 {
-    if (!sr_loaded) return JNI_FALSE;
+    if (!sr_loaded) return nullptr;
 
     // 1. RGBA → ncnn::Mat (RGB)
     jbyte* in = env->GetByteArrayElements(inputData, nullptr);
@@ -86,28 +84,48 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInfer(
     // 2. NCNN 推理
     ncnn::Extractor ex = sr_net.create_extractor();
     ex.set_light_mode(false);
+    if (sr_net.opt.use_vulkan_compute) {
+        ex.set_vulkan_compute(true);
+    }
+
     int ret_in = ex.input("data", in_mat);
     if (ret_in != 0) {
         LOGE("input() failed: %d", ret_in);
-        return JNI_FALSE;
+        return nullptr;
     }
 
     ncnn::Mat out_mat;
     int ret_ex = ex.extract("output", out_mat);
     if (ret_ex != 0) {
         LOGE("extract() failed: %d", ret_ex);
-        return JNI_FALSE;
+        return nullptr;
     }
 
     LOGI("infer: %dx%d → %dx%d (c=%d)", width, height, out_mat.w, out_mat.h, out_mat.c);
 
     // 3. 输出 RGB → RGBA
-    jbyte* out = env->GetByteArrayElements(outputData, nullptr);
-    out_mat.to_pixels((unsigned char*)out, ncnn::Mat::PIXEL_RGB2RGBA);
-    env->ReleaseByteArrayElements(outputData, out, 0);
+    int outW = out_mat.w;
+    int outH = out_mat.h;
+    int pixelSize = outW * outH * 4;
 
-    LOGI("infer OK");
-    return JNI_TRUE;
+    // 返回格式: [outW 4 bytes][outH 4 bytes][RGBA data]
+    int totalSize = 8 + pixelSize;
+    jbyteArray result = env->NewByteArray(totalSize);
+
+    // 写入宽高
+    unsigned char header[8];
+    memcpy(header, &outW, 4);
+    memcpy(header + 4, &outH, 4);
+    env->SetByteArrayRegion(result, 0, 8, (jbyte*)header);
+
+    // 转换并写入像素
+    unsigned char* rgbaBuf = new unsigned char[pixelSize];
+    out_mat.to_pixels(rgbaBuf, ncnn::Mat::PIXEL_RGB2RGBA);
+    env->SetByteArrayRegion(result, 8, pixelSize, (jbyte*)rgbaBuf);
+    delete[] rgbaBuf;
+
+    LOGI("infer OK: returning %dx%d RGBA", outW, outH);
+    return result;
 }
 
 JNIEXPORT void JNICALL

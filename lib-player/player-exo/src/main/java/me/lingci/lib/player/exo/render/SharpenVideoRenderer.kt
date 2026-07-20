@@ -290,12 +290,12 @@ class SharpenVideoRenderer(
 
                 ncnnExecutor.execute {
                     try {
-                        // NCNN 超分：640×360 → 1280×720
+                        // NCNN 超分：640×360 → 1280×720 (model 决定实际输出尺寸)
                         val ncnnOut = sr.infer(scaledBytes, targetW, targetH)
                         if (ncnnOut != null) {
-                            ncnnResultBytes = ncnnOut
-                            ncnnResultWidth = targetW * 2  // 1280
-                            ncnnResultHeight = targetH * 2 // 720
+                            ncnnResultBytes = ncnnOut.first
+                            ncnnResultWidth = ncnnOut.second
+                            ncnnResultHeight = ncnnOut.third
                             ncnnResultReady = true
                         }
                     } catch (e: Exception) {
