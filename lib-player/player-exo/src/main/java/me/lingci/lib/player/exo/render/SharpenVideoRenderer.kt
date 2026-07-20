@@ -261,23 +261,17 @@ class SharpenVideoRenderer(
             return false
         }
 
-        // 1. 如果有新推理结果，上传到纹理（用 glTexSubImage2D 替代 glTexImage2D，避免重新分配）
+        // 1. 如果有新推理结果，上传到纹理
         if (ncnnResultReady && ncnnResultBytes != null) {
             ncnnResultReady = false
             ncnnHasValidResult = true
             try {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
-                // 第一次用 glTexImage2D 初始化纹理，后续用 glTexSubImage2D 更新（更快）
-                GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0,
-                    ncnnResultWidth, ncnnResultHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
                     java.nio.ByteBuffer.wrap(ncnnResultBytes))
             } catch (e: Exception) {
-                // glTexSubImage2D 可能因为尺寸不匹配失败，回退到 glTexImage2D
-                try {
-                    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                        ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
-                        java.nio.ByteBuffer.wrap(ncnnResultBytes))
-                } catch (_: Exception) {}
+                AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
             }
         }
 
