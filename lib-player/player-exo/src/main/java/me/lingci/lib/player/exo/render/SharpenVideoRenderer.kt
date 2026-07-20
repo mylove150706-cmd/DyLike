@@ -279,16 +279,17 @@ class SharpenVideoRenderer(
         if (!ncnnInferInProgress) {
             ncnnInferInProgress = true
             try {
-                // GPU 缩放：用 blit shader 把源 FBO 缩放到小 FBO（GPU 完成，不占 CPU）
+                // GPU 缩放：用 RGBA blit shader（不是 OES blit）把源 FBO 纹理缩放到小 FBO
                 ensureSmallFbo()
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
                 GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-                blitProgram!!.use()
-                blitProgram!!.setSamplerTexIdUniform("uVideoTex", fboTextureId, 0)
-                blitProgram!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
-                blitProgram!!.bindAttributesAndUniforms()
+                // 用 blitProgramForNcnn（读 sampler2D，不是 OES）来缩放
+                blitProgramForNcnn!!.use()
+                blitProgramForNcnn!!.setSamplerTexIdUniform("uTexSampler", fboTextureId, 0)
+                blitProgramForNcnn!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                blitProgramForNcnn!!.bindAttributesAndUniforms()
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
                 // 从小 FBO 读像素（640×360×4 = 0.9MB，比 1080p 的 8MB 快 9 倍）
