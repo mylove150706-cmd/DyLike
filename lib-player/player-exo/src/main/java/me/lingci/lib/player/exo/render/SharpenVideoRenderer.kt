@@ -66,12 +66,18 @@ class SharpenVideoRenderer(
     private var ncnnOutputTexId = 0
     private var blitProgramForNcnn: GlProgram? = null
 
-    // GPU 缩放 FBO（640×360，避免 glReadPixels 1080p）
+    // GPU 缩放 FBO（320×180，减少 glReadPixels 数据量）
     private var smallFboId = 0
     private var smallFboTexId = 0
-    private val SMALL_W = 640
-    private val SMALL_H = 360
-    private var smallPixelBuffer: java.nio.ByteBuffer? = null
+    private val SMALL_W = 320
+    private val SMALL_H = 180
+
+    // PBO 双缓冲（异步 glReadPixels）
+    private val pboIds = IntArray(2)
+    private var pboIndex = 0  // 当前写入的 PBO
+    private var pboInitialized = false
+    private val pboSize = SMALL_W * SMALL_H * 4
+    private var pboReadPending = false  // 上一帧的 PBO 是否可以读取
 
     // 异步推理
     private val ncnnExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -193,8 +199,8 @@ class SharpenVideoRenderer(
             // 渲染优先（每帧都渲染，保证流畅）
             drawNcnnResultToScreen()
 
-            // 异步提交：后台空闲 + 每 30 帧（~1秒1次）才读取，减少 GL 线程阻塞
-            if (!ncnnInferInProgress && frameCount % 30 == 0) {
+            // 异步提交：PBO 异步读取，几乎不阻塞 GL 线程
+            if (!ncnnInferInProgress || pboReadPending) {
                 submitNcnnInference()
             }
         } else {
@@ -236,47 +242,97 @@ class SharpenVideoRenderer(
         }
     }
 
-    /** 异步提交 NCNN 推理（GL 读取 + 后台推理，不阻塞渲染） */
+    /** 异步提交 NCNN 推理（PBO 异步读取 + GPU 降采样） */
     private fun submitNcnnInference() {
         val sr = ncnnSr ?: return
         if (!sr.initialized || fboWidth <= 0) return
 
         ncnnInferInProgress = true
         try {
-            // 直接从源 FBO 读像素（不做 GPU blit 到小 FBO）
-            // GPU blit + glReadPixels 的组合会强制 flush GL 管线导致卡顿
-            // 直接读源 FBO + 后台 CPU 缩放更可靠
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-            GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
+            ensureSmallFbo()
+            ensurePbo()
+
+            // === 第一步：读取上一帧的 PBO 数据（如果就绪）===
+            // PBO 读取是异步的：上一帧 glReadPixels 已经发起 DMA，现在数据应该在内存了
+            if (pboReadPending) {
+                val prevPbo = pboIds[(pboIndex + 1) % 2]
+                GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, prevPbo)
+                // glMapBufferRange 几乎不等待（DMA 已完成）
+                val mapped = GLES20.glMapBufferRange(GLES20.GL_PIXEL_PACK_BUFFER, 0, pboSize,
+                    GLES20.GL_MAP_READ_BIT)
+                if (mapped != null) {
+                    mapped.position(0)
+                    mapped.limit(pboSize)
+                    val inputBytes = ByteArray(pboSize)
+                    mapped.get(inputBytes)
+                    GLES20.glUnmapBuffer(GLES20.GL_PIXEL_PACK_BUFFER)
+                    GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+
+                    // 提交到后台线程推理
+                    ncnnExecutor.execute {
+                        try {
+                            val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
+                            if (ncnnOut != null) {
+                                ncnnResultBytes = ncnnOut.first
+                                ncnnResultWidth = ncnnOut.second
+                                ncnnResultHeight = ncnnOut.third
+                                ncnnResultReady = true
+                            }
+                        } catch (e: Exception) {
+                            AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
+                        } finally {
+                            ncnnInferInProgress = false
+                        }
+                    }
+                    pboReadPending = false
+                    // 不要在这里 return，继续做 GPU blit + 发起新的 PBO 写入
+                } else {
+                    GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+                    pboReadPending = false
+                    ncnnInferInProgress = false
+                    return
+                }
+            } else {
+                ncnnInferInProgress = false
+            }
+
+            // === 第二步：GPU blit 到小 FBO（320×180，GPU 操作不阻塞）===
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
+            GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            blitProgramForNcnn!!.use()
+            blitProgramForNcnn!!.setSamplerTexIdUniform("uTexSampler", fboTextureId, 0)
+            blitProgramForNcnn!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+            blitProgramForNcnn!!.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            // === 第三步：异步 PBO 写入（glReadPixels 到 PBO，立即返回）===
+            val curPbo = pboIds[pboIndex]
+            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, curPbo)
+            // 这个调用立即返回！DMA 异步传输，不阻塞 GL 线程
+            GLES20.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
+            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
-            ensurePixelBuffer().rewind()
-            val fullBytes = ByteArray(fboWidth * fboHeight * 4)
-            ensurePixelBuffer().get(fullBytes)
-
-            val fw = fboWidth
-            val fh = fboHeight
-            ncnnExecutor.execute {
-                try {
-                    // CPU 缩放到 640×360（在后台线程，不阻塞 GL 线程）
-                    val scaledBytes = scaleDownRgba(fullBytes, fw, fh, SMALL_W, SMALL_H)
-                    val ncnnOut = sr.infer(scaledBytes, SMALL_W, SMALL_H)
-                    if (ncnnOut != null) {
-                        ncnnResultBytes = ncnnOut.first
-                        ncnnResultWidth = ncnnOut.second
-                        ncnnResultHeight = ncnnOut.third
-                        ncnnResultReady = true
-                    }
-                } catch (e: Exception) {
-                    AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
-                } finally {
-                    ncnnInferInProgress = false
-                }
-            }
+            pboIndex = (pboIndex + 1) % 2
+            pboReadPending = true
         } catch (e: Exception) {
             AndroidLog.e("SharpenVideoRenderer", "NCNN submit failed: ${e.message}")
             ncnnInferInProgress = false
         }
+    }
+
+    /** 初始化 PBO 双缓冲 */
+    private fun ensurePbo() {
+        if (pboInitialized) return
+        GLES20.glGenBuffers(2, pboIds, 0)
+        for (i in 0..1) {
+            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, pboIds[i])
+            GLES20.glBufferData(GLES20.GL_PIXEL_PACK_BUFFER, pboSize, null, GLES20.GL_DYNAMIC_READ)
+        }
+        GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+        pboInitialized = true
+        Log.d("SharpenVideoRenderer", "PBO initialized: 2x ${SMALL_W}x${SMALL_H} = ${pboSize} bytes each")
     }
 
     /** Pass 1: OES → RGBA FBO */
