@@ -26,7 +26,8 @@ import javax.microedition.khronos.opengles.GL10
  */
 class SharpenVideoRenderer(
     private val context: Context,
-    private val onSurfaceTextureReady: (SurfaceTexture) -> Unit
+    private val onSurfaceTextureReady: (SurfaceTexture) -> Unit,
+    private val useNcnn: Boolean = false
 ) : GLSurfaceView.Renderer {
 
     companion object {
@@ -58,6 +59,13 @@ class SharpenVideoRenderer(
     private var glSurfaceViewRef: WeakReference<GLSurfaceView>? = null
     private var videoWidth = 0
     private var videoHeight = 0
+
+    // ===== NCNN 混合模式字段 =====
+    private var ncnnSr: me.lingci.lib.player.exo.ncnn.NcnnSuperResolution? = null
+    private var frameCount = 0
+    private var ncnnOutputTexId = 0  // NCNN 超分结果的 2x 分辨率纹理
+    private var pixelBuffer: java.nio.ByteBuffer? = null  // glReadPixels 的缓冲
+    private var blitProgramForNcnn: GlProgram? = null  // 用于渲染 NCNN 输出纹理的 blit shader
 
     private val sharpenAmount: Float = try {
         val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
@@ -111,6 +119,35 @@ class SharpenVideoRenderer(
             }
 
             Log.d("SharpenVideoRenderer", "onSurfaceCreated OK (dual-pass), textureId=$textureId")
+
+            // ===== NCNN 初始化 =====
+            if (useNcnn) {
+                ncnnSr = me.lingci.lib.player.exo.ncnn.NcnnSuperResolution().also {
+                    val ok = it.init(context)
+                    Log.d("SharpenVideoRenderer", "NCNN init: $ok")
+                }
+                // 创建 NCNN 输出纹理（2x 分辨率）
+                val texIds = IntArray(1)
+                GLES20.glGenTextures(1, texIds, 0)
+                ncnnOutputTexId = texIds[0]
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+                // blit shader 用于渲染 NCNN 输出（跟 Pass 1 的 blit 类似，但读 sampler2D 而不是 OES）
+                blitProgramForNcnn = GlProgram(
+                    context,
+                    "shaders/video_vertex_es2.glsl",
+                    "shaders/blit_rgba_es2.glsl"
+                ).apply {
+                    setBufferAttribute("aFramePosition",
+                        GlUtil.getNormalizedCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
+                    setBufferAttribute("aTexCoords",
+                        GlUtil.getTextureCoordinateBounds(), GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE)
+                }
+            }
         } catch (e: Exception) {
             AndroidLog.e("SharpenVideoRenderer", "onSurfaceCreated failed: ${e.message}")
         }
@@ -134,32 +171,49 @@ class SharpenVideoRenderer(
         // 确保 FBO 尺寸匹配视频尺寸
         ensureFbo()
 
-        // ===== Pass 1: OES → RGBA FBO =====
-        if (fboId != 0 && blitProgram != null) {
-            try {
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
-                GLES20.glViewport(0, 0, fboWidth, fboHeight)
-                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        // ===== Pass 1: OES → RGBA FBO（总是执行） =====
+        blitOesToFbo()
 
-                blitProgram!!.use()
-                blitProgram!!.setSamplerTexIdUniform("uVideoTex", textureId, 0)
-                blitProgram!!.setFloatsUniform("uTexTransform", transformMatrix)
-                blitProgram!!.bindAttributesAndUniforms()
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-
-                // 解绑 FBO，回到默认 framebuffer（屏幕）
-                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
-            } catch (e: GlUtil.GlException) {
-                AndroidLog.e("SharpenVideoRenderer", "Pass 1 blit failed: ${e.message}")
+        // ===== Pass 2: 根据模式选择渲染路径 =====
+        if (useNcnn && ncnnSr?.initialized == true && fboId != 0) {
+            // NCNN 混合模式：偶数帧 NCNN 超分，奇数帧 SGSR1 锐化
+            if (frameCount % 2 == 0) {
+                drawFrameWithNcnn()
+            } else {
+                drawFrameWithSgsr1()
             }
+        } else {
+            // 纯 SGSR1 模式
+            drawFrameWithSgsr1()
         }
+        frameCount++
+    }
 
-        // ===== Pass 2: RGBA FBO → SGSR1 → 屏幕 =====
-        // 只有 FBO 已创建（视频尺寸已知）时才跑 Pass 2
+    /** Pass 1: OES → RGBA FBO */
+    private fun blitOesToFbo() {
+        if (fboId == 0 || blitProgram == null) return
+        try {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glViewport(0, 0, fboWidth, fboHeight)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            blitProgram!!.use()
+            blitProgram!!.setSamplerTexIdUniform("uVideoTex", textureId, 0)
+            blitProgram!!.setFloatsUniform("uTexTransform", transformMatrix)
+            blitProgram!!.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        } catch (e: GlUtil.GlException) {
+            AndroidLog.e("SharpenVideoRenderer", "Pass 1 blit failed: ${e.message}")
+        }
+    }
+
+    /** Pass 2 (SGSR1): RGBA FBO → SGSR1 shader → 屏幕 */
+    private fun drawFrameWithSgsr1() {
         if (fboId == 0 || fboTextureId == 0) return
         sgsrProgram?.let { p ->
             try {
-                // 恢复 viewport 到屏幕尺寸
                 val view = glSurfaceViewRef?.get()
                 if (view != null) {
                     GLES20.glViewport(0, 0, view.width, view.height)
@@ -168,7 +222,6 @@ class SharpenVideoRenderer(
 
                 p.use()
                 p.setSamplerTexIdUniform("uVideoTex", fboTextureId, 0)
-                // SGSR1 从 FBO 采样，FBO 的 UV 不需要 transform（已经 blit 时应用过了）
                 p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
                 if (videoWidth > 0 && videoHeight > 0) {
                     p.setFloatsUniformIfPresent("uViewportInfo",
@@ -181,6 +234,63 @@ class SharpenVideoRenderer(
                 AndroidLog.e("SharpenVideoRenderer", "Pass 2 SGSR1 failed: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Pass 2 (NCNN): RGBA FBO → glReadPixels → NCNN 推理 → glTexImage2D → 屏幕
+     *
+     * 比 SGSR1 慢（~71ms/帧），但画质明显更好（神经网络超分）。
+     */
+    private fun drawFrameWithNcnn() {
+        val sr = ncnnSr ?: return
+        if (!sr.initialized || fboWidth <= 0 || fboHeight <= 0) return
+
+        try {
+            // 1. 从 FBO 读像素到 CPU
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId)
+            GLES20.glReadPixels(0, 0, fboWidth, fboHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensurePixelBuffer())
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            // 2. ByteBuffer → ByteArray → NCNN 推理
+            pixelBuffer!!.rewind()
+            val inputBytes = ByteArray(fboWidth * fboHeight * 4)
+            pixelBuffer!!.get(inputBytes)
+            val output = sr.infer(inputBytes, fboWidth, fboHeight) ?: return
+
+            // 3. 上传超分结果到纹理
+            val outWidth = fboWidth * 2
+            val outHeight = fboHeight * 2
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                outWidth, outHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                java.nio.ByteBuffer.wrap(output))
+
+            // 4. 渲染超分纹理到屏幕
+            val view = glSurfaceViewRef?.get()
+            if (view != null) {
+                GLES20.glViewport(0, 0, view.width, view.height)
+            }
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            blitProgramForNcnn?.let { p ->
+                p.use()
+                p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
+                p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                p.bindAttributesAndUniforms()
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+        } catch (e: Exception) {
+            AndroidLog.e("SharpenVideoRenderer", "NCNN path failed: ${e.message}")
+        }
+    }
+
+    private fun ensurePixelBuffer(): java.nio.ByteBuffer {
+        val size = fboWidth * fboHeight * 4
+        if (pixelBuffer == null || pixelBuffer!!.capacity() < size) {
+            pixelBuffer = java.nio.ByteBuffer.allocateDirect(size)
+        }
+        pixelBuffer!!.rewind()
+        return pixelBuffer!!
     }
 
     /** 创建或调整 RGBA FBO 尺寸以匹配视频分辨率。 */
@@ -236,10 +346,15 @@ class SharpenVideoRenderer(
             surfaceTexture?.release()
             blitProgram?.delete()
             sgsrProgram?.delete()
+            blitProgramForNcnn?.delete()
             if (fboId != 0) {
                 GLES20.glDeleteFramebuffers(1, intArrayOf(fboId), 0)
                 GLES20.glDeleteTextures(1, intArrayOf(fboTextureId), 0)
             }
+            if (ncnnOutputTexId != 0) {
+                GLES20.glDeleteTextures(1, intArrayOf(ncnnOutputTexId), 0)
+            }
+            ncnnSr?.release()
         } catch (_: Exception) {}
     }
 }

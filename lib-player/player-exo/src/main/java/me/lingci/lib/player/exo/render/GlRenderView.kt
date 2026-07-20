@@ -61,7 +61,12 @@ class GlRenderView @JvmOverloads constructor(
 
     override fun attachToPlayer(player: AbstractPlayer) {
         mediaPlayer = player
-        videoRenderer = SharpenVideoRenderer(context) { surfaceTexture ->
+        // 读 NCNN 超分开关
+        val useNcnn = try {
+            val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            sp.getBoolean("labNeuralSuperResolution", false)
+        } catch (_: Throwable) { false }
+        videoRenderer = SharpenVideoRenderer(context, { surfaceTexture ->
             // 此回调在 GL 线程触发，切回主线程调 player.setVideoSurface
             mainHandler.post {
                 if (!isReleased) {
@@ -73,7 +78,7 @@ class GlRenderView @JvmOverloads constructor(
                     }
                 }
             }
-        }.also {
+        }, useNcnn).also {
             it.bindGlSurfaceView(this)
         }
         setRenderer(videoRenderer)
