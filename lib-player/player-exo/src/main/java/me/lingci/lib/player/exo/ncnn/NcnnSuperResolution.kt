@@ -21,6 +21,10 @@ class NcnnSuperResolution {
         private const val TAG = "NcnnSuperResolution"
         private const val PARAM_PATH = "models/realesr-animevideov3-x2.param"
         private const val BIN_PATH = "models/realesr-animevideov3-x2.bin"
+
+        init {
+            System.loadLibrary("ncnn-sr")
+        }
     }
 
     var initialized = false
