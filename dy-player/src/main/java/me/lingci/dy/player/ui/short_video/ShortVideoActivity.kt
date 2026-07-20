@@ -590,7 +590,7 @@ class ShortVideoActivity : BaseActivity() {
     private fun applyPlaybackCoreFor(videoBean: VideoData) {
         if (isSmbVideo(videoBean)) {
             applyShortVideoRenderFactory()
-            DyPlayerCoreRegistry.applyCore(mVideoView, DyPlayerCore.EXO, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
+            DyPlayerCoreRegistry.applyCore(mVideoView, DyPlayerCore.EXO, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, spUtil.labNeuralSuperResolution)
             if (!spUtil.sortRender) {
                 mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
             }
@@ -605,7 +605,7 @@ class ShortVideoActivity : BaseActivity() {
             if (!spUtil.labMpvSpecialRender) {
                 mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
             }
-            DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
+            DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, spUtil.labNeuralSuperResolution)
             // Do not replace MPV's required Surface renderer with the short-video renderer. MPV keeps
             // default scaling here until fast-swipe Surface reuse is validated across devices.
             //mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_CENTER_CROP);
@@ -615,9 +615,9 @@ class ShortVideoActivity : BaseActivity() {
         if (spUtil.sortRender) {
             applyShortVideoRenderFactory()
         }
-        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
+        DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, spUtil.labNeuralSuperResolution)
         // 画质增强开启时保留 applyCore 设的 GlRenderViewFactory，不要被 TextureRenderView 覆盖
-        if (!spUtil.sortRender && !spUtil.labMpvSuperResolution) {
+        if (!spUtil.sortRender && !spUtil.labMpvSuperResolution && !spUtil.labNeuralSuperResolution) {
             mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
             mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
         }

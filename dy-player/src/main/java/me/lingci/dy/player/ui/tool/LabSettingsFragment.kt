@@ -92,6 +92,25 @@ class LabSettingsFragment : BaseFragment() {
         binding.swDebugMode.setOnClickListener {
             spUtil.debugMode = binding.swDebugMode.isChecked
         }
+        binding.swLabNeuralSr.isChecked = spUtil.labNeuralSuperResolution
+        binding.swLabNeuralSr.setOnClickListener {
+            val on = binding.swLabNeuralSr.isChecked
+            spUtil.labNeuralSuperResolution = on
+            // 互斥：开 NCNN 时关 SGSR1
+            if (on && spUtil.labMpvSuperResolution) {
+                spUtil.labMpvSuperResolution = false
+                binding.swLabMpvSuperResolution.isChecked = false
+            }
+            // 发广播触发重播以应用新设置
+            val action = if (on) LongVideoActivity.ACTION_SUPER_RESOLUTION_ON
+                         else LongVideoActivity.ACTION_SUPER_RESOLUTION_OFF
+            requireContext().sendBroadcast(Intent(action))
+            Toast.makeText(
+                requireContext(),
+                if (on) "神经网络超分：已开启（重播以生效）" else "神经网络超分：已关闭（重播以生效）",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
         binding.swLabLongVideoPortrait.isChecked = spUtil.labLongVideoPortrait
         binding.swLabLongVideoPortrait.setOnClickListener {
             spUtil.labLongVideoPortrait = binding.swLabLongVideoPortrait.isChecked

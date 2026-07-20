@@ -203,6 +203,12 @@ open class SpUtil(context: Context) : SpBase(context) {
      */
     var labSuperResolutionStrength by SPManager.float(1.0f)
 
+    /**
+     * 神经网络超分：开启后用 NCNN + Real-ESRGANv3 做实时 AI 超分。
+     * 与 labMpvSuperResolution（SGSR1）互斥。仅 ExoPlayer 内核生效。
+     */
+    var labNeuralSuperResolution by SPManager.boolean(false)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 
