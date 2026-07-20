@@ -26,8 +26,9 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
 
     // Vulkan GPU
     sr_net.opt.num_threads = 4;
-    sr_net.opt.use_fp16_packed  = true;
-    sr_net.opt.use_fp16_storage = true;
+    sr_net.opt.use_fp16_packed    = true;
+    sr_net.opt.use_fp16_storage   = true;
+    sr_net.opt.use_fp16_arithmetic = true;  // FP16 计算（Adreno/Mali GPU 上速度翻倍）
 
 #if NCNN_VULKAN
     if (ncnn::get_gpu_count() > 0) {

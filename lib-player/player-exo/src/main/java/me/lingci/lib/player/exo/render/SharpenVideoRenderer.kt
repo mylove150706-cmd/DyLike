@@ -176,12 +176,8 @@ class SharpenVideoRenderer(
 
         // ===== Pass 2: 根据模式选择渲染路径 =====
         if (useNcnn && ncnnSr?.initialized == true && fboId != 0) {
-            // NCNN 混合模式：偶数帧 NCNN 超分，奇数帧 SGSR1 锐化
-            if (frameCount % 2 == 0) {
-                drawFrameWithNcnn()
-            } else {
-                drawFrameWithSgsr1()
-            }
+            // NCNN 全帧超分模式：每帧都走神经网络推理
+            drawFrameWithNcnn()
         } else {
             // 纯 SGSR1 模式
             drawFrameWithSgsr1()
