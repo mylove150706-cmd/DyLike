@@ -112,11 +112,19 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
      * 传 null 或空列表表示禁用所有效果。
      */
     public void setVideoEffects(@Nullable List<Effect> effects) {
+        android.util.Log.e("SuperResDebug", "ExoMediaPlayer.setVideoEffects size=" + (effects == null ? 0 : effects.size()) + ", mInternalPlayer=" + mInternalPlayer);
         mVideoEffects = effects;
         if (mInternalPlayer != null) {
-            mInternalPlayer.setVideoEffects(
-                    effects != null ? effects : Collections.<Effect>emptyList()
-            );
+            try {
+                mInternalPlayer.setVideoEffects(
+                        effects != null ? effects : Collections.<Effect>emptyList()
+                );
+                android.util.Log.e("SuperResDebug", "mInternalPlayer.setVideoEffects OK");
+            } catch (Throwable t) {
+                android.util.Log.e("SuperResDebug", "mInternalPlayer.setVideoEffects FAILED", t);
+            }
+        } else {
+            android.util.Log.e("SuperResDebug", "mInternalPlayer is null, effects stored for next init");
         }
     }
 

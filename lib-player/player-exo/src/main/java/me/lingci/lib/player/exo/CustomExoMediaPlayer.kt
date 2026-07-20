@@ -174,7 +174,17 @@ class CustomExoMediaPlayer(context: Context) : ExoMediaPlayer(context),
         } else {
             emptyList()
         }
-        setVideoEffects(effects)
+        android.util.Log.e("SuperResDebug", "setSuperResolutionEnabled($enabled), effects=${effects.size}")
+        try {
+            setVideoEffects(effects)
+            // 注：Media3 setVideoEffects 在 runtime 通常不会立即应用到正在播放的 stream。
+            // 实测确认：需要 player 完全 release + recreate（通过 BaseVideoView 重建）才生效。
+            // 这里只写 SP 和 mVideoEffects 字段。运行时立即生效由调用方（Activity）控制——
+            // 需要调 videoView.release() + videoView.startPlay() 重新创建播放器。
+            android.util.Log.e("SuperResDebug", "setVideoEffects OK; restart player to take effect")
+        } catch (e: Throwable) {
+            android.util.Log.e("SuperResDebug", "FAILED", e)
+        }
     }
 
     /**
