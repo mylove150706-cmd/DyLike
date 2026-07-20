@@ -24,11 +24,15 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
     const char* param = env->GetStringUTFChars(paramPath, nullptr);
     const char* bin   = env->GetStringUTFChars(binPath,   nullptr);
 
-    // Vulkan GPU
+    // Vulkan GPU - 全部优化开启
     sr_net.opt.num_threads = 4;
-    sr_net.opt.use_fp16_packed    = true;
-    sr_net.opt.use_fp16_storage   = true;
-    sr_net.opt.use_fp16_arithmetic = true;  // FP16 计算（Adreno/Mali GPU 上速度翻倍）
+    sr_net.opt.use_fp16_packed     = true;
+    sr_net.opt.use_fp16_storage    = true;
+    sr_net.opt.use_fp16_arithmetic = true;
+    sr_net.opt.use_winograd_convolution = true;   // 3x3 卷积加速（SR 模型全是 3x3）
+    sr_net.opt.use_sgemm_convolution = true;      // GEMM 路径优化
+    sr_net.opt.use_int8_storage     = true;       // INT8 存储
+    sr_net.opt.use_int8_arithmetic  = true;       // INT8 计算（Vulkan GPU 路径）
 
 #if NCNN_VULKAN
     if (ncnn::get_gpu_count() > 0) {
