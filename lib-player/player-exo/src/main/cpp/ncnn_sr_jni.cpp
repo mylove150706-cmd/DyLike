@@ -76,6 +76,8 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInfer(
         (const unsigned char*)in, ncnn::Mat::PIXEL_RGBA, width, height);
     env->ReleaseByteArrayElements(inputData, in, JNI_ABORT);
 
+    LOGI("infer: input %dx%d, in_mat w=%d h=%d c=%d", width, height, in_mat.w, in_mat.h, in_mat.c);
+
     // 2. NCNN 推理
     ncnn::Extractor ex = sr_net.create_extractor();
     ex.set_light_mode(false);
@@ -89,6 +91,14 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInfer(
     int ret_ex = ex.extract("output", out_mat);
     if (ret_ex != 0) {
         LOGE("extract() failed: %d", ret_ex);
+        return JNI_FALSE;
+    }
+
+    LOGI("infer: out_mat w=%d h=%d c=%d (expected %dx%d)", out_mat.w, out_mat.h, out_mat.c, outWidth, outHeight);
+
+    // 检查输出尺寸是否匹配预期
+    if (out_mat.w != outWidth || out_mat.h != outHeight) {
+        LOGE("Output size mismatch: got %dx%d, expected %dx%d", out_mat.w, out_mat.h, outWidth, outHeight);
         return JNI_FALSE;
     }
 
