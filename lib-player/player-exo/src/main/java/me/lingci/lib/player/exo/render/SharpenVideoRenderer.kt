@@ -38,6 +38,8 @@ class SharpenVideoRenderer(
     private var surfaceTexture: SurfaceTexture? = null
     private var program: GlProgram? = null
     private var glSurfaceViewRef: WeakReference<GLSurfaceView>? = null
+    private var videoWidth = 0
+    private var videoHeight = 0
 
     /** 绑定外层 GLSurfaceView，用于在 onFrameAvailable 触发 requestRender。 */
     fun bindGlSurfaceView(view: GLSurfaceView) {
@@ -58,11 +60,11 @@ class SharpenVideoRenderer(
             }
             // 3. 通知外层（外层负责切回主线程把 Surface 给 ExoPlayer）
             onSurfaceTextureReady(surfaceTexture!!)
-            // 4. 编译 shader（Phase 1 用 tint）
+            // 4. 编译 shader（Phase 2 用 unsharp mask 锐化）
             program = GlProgram(
                 context,
                 /* vertexShaderFilePath */ "shaders/video_vertex_es2.glsl",
-                /* fragmentShaderFilePath */ "shaders/tint_fragment_es2.glsl"
+                /* fragmentShaderFilePath */ "shaders/unsharp_fragment_es2.glsl"
             ).apply {
                 setBufferAttribute(
                     "aFramePosition",
@@ -100,6 +102,11 @@ class SharpenVideoRenderer(
                 p.use()
                 p.setSamplerTexIdUniform("uVideoTex", textureId, /* texUnitIndex */ 0)
                 p.setFloatsUniform("uTexTransform", transformMatrix)
+                // Phase 2: 设置 unsharp mask 所需的 uTexelSize + uSharpenAmount
+                if (videoWidth > 0 && videoHeight > 0) {
+                    p.setFloatsUniform("uTexelSize", floatArrayOf(1f / videoWidth, 1f / videoHeight))
+                }
+                p.setFloatUniform("uSharpenAmount", 1.0f)
                 p.bindAttributesAndUniforms()
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, /* first */ 0, /* count */ 4)
@@ -109,9 +116,12 @@ class SharpenVideoRenderer(
         }
     }
 
-    /** 视频尺寸变化时调用（用于将来算 uTexelSize）。 */
+    /** 视频尺寸变化时调用，用于算 uTexelSize。 */
     fun onVideoSizeChanged(width: Int, height: Int) {
-        // Phase 1 tint 不用，留接口给 Phase 2
+        if (width > 0 && height > 0) {
+            videoWidth = width
+            videoHeight = height
+        }
     }
 
     /** 截图：glReadPixels 读 framebuffer（在 GL 线程调用）。 */
