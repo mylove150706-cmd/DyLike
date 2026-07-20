@@ -181,6 +181,28 @@ open class SpUtil(context: Context) : SpBase(context) {
      */
     var labMpvSequentialRead by SPManager.boolean(true)
 
+    /**
+     * 画质增强：开启后给 ExoPlayer 内核挂 GLSurfaceView 渲染管线 + 锐化 shader，
+     * 实时锐化视频画面。仅 ExoPlayer 内核生效。
+     *
+     * 历史命名：曾经是 MPV FSR 试用键（labMpvSuperResolution），后续路线均废弃
+     * （MPV shader hook 输出不生效；Media3 setVideoEffects 1.9.0 有 output surface bug），
+     * 但 SP 键名保留以兼容备份文件和已开过该开关的用户。
+     *
+     * ⚠️ 跨模块约定：此 key 由 dy-player/SpUtil 定义，dy-player/DyPlayerCoreRegistry
+     * 在 applyCore 时读取以决定是否用 GlRenderView。重命名属性会破坏 Exo 端读取。
+     */
+    var labMpvSuperResolution by SPManager.boolean(false)
+
+    /**
+     * 画质增强锐化强度，0.0-3.0，默认 1.0。
+     * 0 = 关闭锐化（但仍走 GlRenderView）；3 = 极强（可能过锐/噪点放大）。
+     * 1.0 = 温和；2.0 = 明显锐利。
+     *
+     * ⚠️ 跨模块约定：此 key 由 lib-player/player-exo/SharpenVideoRenderer 在构造时读取。
+     */
+    var labSuperResolutionStrength by SPManager.float(1.0f)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 

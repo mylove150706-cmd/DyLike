@@ -137,7 +137,7 @@ class MpvMediaPlayer(context: Context) : AbstractPlayer(),
      */
     private val SP_KEY_LAB_MPV_SEQUENTIAL_READ = "labMpvSequentialRead"
     private val SP_LAB_MPV_SEQUENTIAL_READ_DEFAULT = true
-    
+
     // HDR模式
     enum class HdrMode {
         SDR_MAPPING,       // 稳定优先：映射到 SDR 目标显示。

@@ -92,6 +92,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         private const val KEY_TEMP = "temp"
         private const val BACKGROUND_RECOVERY_WINDOW_MS = 5000L
 
+        // 超分开关广播 action（adb 和 LabSettingsFragment 都可发）
+        const val ACTION_SUPER_RESOLUTION_ON = "me.lingci.dy.player.SUPER_RES_ON"
+        const val ACTION_SUPER_RESOLUTION_OFF = "me.lingci.dy.player.SUPER_RES_OFF"
+
         fun start(context: Context, list: ArrayList<VideoData>, index: Int, history: Boolean) {
             val bundle = bundleOf()
             bundle.putInt(KEY_INDEX, index)
@@ -207,6 +211,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
+
+    // 超分开关广播接收器：收到 ON/OFF 时写 SP 并重播当前视频以应用新的 render view。
+    // 注意：GLSurfaceView 不能热切换，必须重建 player。
+    private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val on = intent.action == ACTION_SUPER_RESOLUTION_ON
+            if (spUtil.labMpvSuperResolution == on) return  // 状态没变，跳过
+            spUtil.labMpvSuperResolution = on
+            android.widget.Toast.makeText(
+                this@LongVideoActivity,
+                if (on) "画质增强：已开启（重播以生效）" else "画质增强：已关闭（重播以生效）",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+            // 重播当前视频，触发 player + render view 重建
+            startPlay(mCurPos)
+        }
+    }
+    private var isSuperResReceiverRegistered = false
 
     private fun getPlayerCapabilities(): PlayerCapabilities {
         return videoView.getPlayerCapability(PlayerCapabilityProvider::class.java)
@@ -376,7 +398,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         // Apply the generic render preference first. MPV is allowed to override it below because
         // MPV playback requires its own Surface-backed render view.
         applyConfiguredRenderFactory()
-        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender)
+        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
         videoView.setOnPlayerInitializedListener { player ->
             // BaseVideoView may recreate the backend; reattach both Exo-only settings and common
             // capability listeners for every new concrete player instance.
@@ -470,7 +492,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private fun applyPlaybackCoreFor(videoBean: VideoData, playUrl: String) {
         applyConfiguredRenderFactory()
         val core = if (isSmbVideo(videoBean, playUrl)) DyPlayerCore.EXO else spUtil.dyPlayerCore
-        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender)
+        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
     }
 
     private fun applyConfiguredRenderFactory() {
@@ -864,6 +886,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
                 }
             }
         }
+        // 注册超分开关广播接收器（让 adb 和设置页都能切换 FSR）
+        registerSuperResolutionReceiver()
     }
 
     override fun onPause() {
@@ -887,6 +911,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         super.onDestroy()
         // 注销 PiP 广播接收器，避免内存泄漏
         unregisterPipActionReceiver()
+        // 注销超分开关广播接收器
+        unregisterSuperResolutionReceiver()
         mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
@@ -1297,6 +1323,28 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         if (isPipReceiverRegistered) {
             unregisterReceiver(pipActionReceiver)
             isPipReceiverRegistered = false
+        }
+    }
+
+    // 注册超分开关广播接收器（exported，让 adb 和 LabSettingsFragment 都能发）。
+    private fun registerSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(ACTION_SUPER_RESOLUTION_ON)
+            addAction(ACTION_SUPER_RESOLUTION_OFF)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(superResolutionReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(superResolutionReceiver, filter)
+        }
+        isSuperResReceiverRegistered = true
+    }
+
+    private fun unregisterSuperResolutionReceiver() {
+        if (isSuperResReceiverRegistered) {
+            unregisterReceiver(superResolutionReceiver)
+            isSuperResReceiverRegistered = false
         }
     }
 
