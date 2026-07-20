@@ -6,7 +6,9 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.OptIn;
+import androidx.media3.common.Effect;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
@@ -27,6 +29,8 @@ import androidx.media3.exoplayer.trackselection.TrackSelector;
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter;
 import androidx.media3.exoplayer.util.EventLogger;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import me.lingci.lib.base.util.Log;
@@ -50,6 +54,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private LoadControl mLoadControl;
     private RenderersFactory mRenderersFactory;
     private TrackSelector mTrackSelector;
+
+    @Nullable
+    private List<Effect> mVideoEffects = null;
 
     public ExoMediaPlayer(Context context) {
         mAppContext = context.getApplicationContext();
@@ -84,6 +91,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 bandwidthMeter,
                 new DefaultAnalyticsCollector(Clock.DEFAULT))
                 .build();
+        // 应用视频效果（如画质增强 GlEffect）。Media3 1.9.0 的 ExoPlayer.Builder 没有
+        // setVideoEffects 重载，只能在 player 创建后通过实例方法设置。
+        if (mVideoEffects != null && !mVideoEffects.isEmpty()) {
+            mInternalPlayer.setVideoEffects(mVideoEffects);
+        }
         setOptions();
         Log.d(this, "initPlayer", mRenderersFactory.getClass().getName(), mTrackSelector.getClass().getName());
 
@@ -93,6 +105,24 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
 
         mInternalPlayer.addListener(this);
+    }
+
+    /**
+     * 设置视频效果列表。运行时可调用，会同步到 mInternalPlayer。
+     * 传 null 或空列表表示禁用所有效果。
+     */
+    public void setVideoEffects(@Nullable List<Effect> effects) {
+        mVideoEffects = effects;
+        if (mInternalPlayer != null) {
+            mInternalPlayer.setVideoEffects(
+                    effects != null ? effects : Collections.<Effect>emptyList()
+            );
+        }
+    }
+
+    @Nullable
+    public List<Effect> getVideoEffects() {
+        return mVideoEffects;
     }
 
     public void setTrackSelector(TrackSelector trackSelector) {
