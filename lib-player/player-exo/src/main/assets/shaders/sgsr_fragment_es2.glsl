@@ -1,27 +1,17 @@
-// SGSR1 (Snapdragon Game Super Resolution 1) - GLES 2.0 + OES 忠实移植版
+// SGSR1 (Snapdragon Game Super Resolution 1) - GLES 2.0 双 pass 版
 // 原版: https://github.com/SnapdragonGameStudios/snapdragon-gsr
 //      sgsr/v1/include/glsl/sgsr1_shader_mobile.frag
 // 许可: BSD-3-Clause (Qualcomm Innovation Center)
 //
-// 适配说明:
-//   #version 300 es → ES 2.0 + GL_OES_EGL_image_external
-//   sampler2D ps0 → samplerExternalOES uVideoTex
-//   textureLod(ps0, uv, 0.0) → texture2D(uVideoTex, uv)
-//   textureGather(ps0, coord, mode) → 4x texture2D 模拟
-//   layout(...) → 去掉，用 varying + gl_FragColor
-//   ViewportInfo[0].xy = uSourceTexelSize (1/sourceW, 1/sourceH)
-//   ViewportInfo[0].zw = uSourceSize (sourceW, sourceH)
-//
-// textureGather 展开规则（GLES 3.0 spec）:
-//   textureGather(s, P, comp) 返回以 P 为起点的 2x2 像素块，
-//   采样 comp 通道，返回顺序：(P+右下, P+左下, P+右上, P+左上)
-//   即 .x=(P+1,1), .y=(P+0,1), .z=(P+1,0), .w=(P+0,0)
+// 双 pass 优化（Mali GPU / 麒麟处理器）:
+//   Pass 1: OES 外部纹理 → RGBA FBO（1 次采样，YUV→RGB 只做 1 次）
+//   Pass 2: RGBA FBO → SGSR1 → 屏幕（25 次采样读快速 sampler2D）
+//   本 shader 是 Pass 2，从 sampler2D 采样而不是 samplerExternalOES
 
-#extension GL_OES_EGL_image_external : require
 precision mediump float;
 precision highp int;
 
-uniform samplerExternalOES uVideoTex;
+uniform sampler2D uVideoTex;  // 从 RGBA FBO 采样（Pass 1 blit 的输出）
 // ViewportInfo: .xy = 1/sourceSize (texel size), .zw = sourceSize (pixels)
 uniform vec4 uViewportInfo;  // = vec4(1.0/srcW, 1.0/srcH, srcW, srcH)
 
