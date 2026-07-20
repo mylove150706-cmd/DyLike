@@ -189,15 +189,99 @@ class SharpenVideoRenderer(
         // ===== Pass 1: OES → RGBA FBO（总是执行） =====
         blitOesToFbo()
 
-        // ===== Pass 2: 根据模式选择渲染路径 =====
         if (useNcnn && ncnnSr?.initialized == true && fboId != 0) {
-            // NCNN 异步超分模式
-            drawFrameWithNcnn()
+            // NCNN 模式：先渲染超分结果到屏幕，再异步提交新帧
+            // 渲染优先：确保画面流畅，NCNN 结果延迟 1-2 帧可接受
+            drawNcnnResultToScreen()
+
+            // 异步提交：只在后台空闲时才做 glReadPixels + NCNN
+            if (!ncnnInferInProgress) {
+                submitNcnnInference()
+            }
         } else {
-            // 纯 SGSR1 模式
             drawFrameWithSgsr1()
         }
         frameCount++
+    }
+
+    /** 渲染 NCNN 超分结果到屏幕（只做渲染，不做读取/推理） */
+    private fun drawNcnnResultToScreen() {
+        // 如果有新推理结果，上传到纹理
+        if (ncnnResultReady && ncnnResultBytes != null) {
+            ncnnResultReady = false
+            ncnnHasValidResult = true
+            try {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                    java.nio.ByteBuffer.wrap(ncnnResultBytes))
+            } catch (e: Exception) {
+                AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
+            }
+        }
+
+        // 渲染
+        if (ncnnHasValidResult) {
+            val view = glSurfaceViewRef?.get()
+            if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            blitProgramForNcnn?.let { p ->
+                p.use()
+                p.setSamplerTexIdUniform("uTexSampler", ncnnOutputTexId, 0)
+                p.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+                p.bindAttributesAndUniforms()
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            }
+        } else {
+            drawFrameWithSgsr1()
+        }
+    }
+
+    /** 异步提交 NCNN 推理（GL 读取 + 后台推理，不阻塞渲染） */
+    private fun submitNcnnInference() {
+        val sr = ncnnSr ?: return
+        if (!sr.initialized || fboWidth <= 0) return
+
+        ncnnInferInProgress = true
+        try {
+            ensureSmallFbo()
+            // blit 到小 FBO
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, smallFboId)
+            GLES20.glViewport(0, 0, SMALL_W, SMALL_H)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            blitProgramForNcnn!!.use()
+            blitProgramForNcnn!!.setSamplerTexIdUniform("uTexSampler", fboTextureId, 0)
+            blitProgramForNcnn!!.setFloatsUniform("uTexTransform", GlUtil.create4x4IdentityMatrix())
+            blitProgramForNcnn!!.bindAttributesAndUniforms()
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+            // 读像素
+            GLES20.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, ensureSmallPixelBuffer())
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+
+            smallPixelBuffer!!.rewind()
+            val inputBytes = ByteArray(SMALL_W * SMALL_H * 4)
+            smallPixelBuffer!!.get(inputBytes)
+
+            ncnnExecutor.execute {
+                try {
+                    val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
+                    if (ncnnOut != null) {
+                        ncnnResultBytes = ncnnOut.first
+                        ncnnResultWidth = ncnnOut.second
+                        ncnnResultHeight = ncnnOut.third
+                        ncnnResultReady = true
+                    }
+                } catch (e: Exception) {
+                    AndroidLog.e("SharpenVideoRenderer", "NCNN async infer failed: ${e.message}")
+                } finally {
+                    ncnnInferInProgress = false
+                }
+            }
+        } catch (e: Exception) {
+            AndroidLog.e("SharpenVideoRenderer", "NCNN submit failed: ${e.message}")
+            ncnnInferInProgress = false
+        }
     }
 
     /** Pass 1: OES → RGBA FBO */
