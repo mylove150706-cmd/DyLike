@@ -122,6 +122,11 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     const float denorm_vals[3] = { 255.f, 255.f, 255.f };
     out_mat.substract_mean_normalize(nullptr, denorm_vals);
 
+    // 诊断：输出 float 值前几个像素
+    const float* pout = (const float*)out_mat.data;
+    LOGI("infer output float: [%.3f,%.3f,%.3f] [%.3f,%.3f,%.3f]",
+        pout[0], pout[1], pout[2], pout[3], pout[4], pout[5]);
+
     // 转换并写入像素
     unsigned char* rgbaBuf = new unsigned char[pixelSize];
     out_mat.to_pixels(rgbaBuf, ncnn::Mat::PIXEL_RGB2RGBA);
