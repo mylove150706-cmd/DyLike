@@ -261,17 +261,23 @@ class SharpenVideoRenderer(
             return false
         }
 
-        // 1. 如果有新推理结果，上传到纹理
+        // 1. 如果有新推理结果，上传到纹理（用 glTexSubImage2D 替代 glTexImage2D，避免重新分配）
         if (ncnnResultReady && ncnnResultBytes != null) {
             ncnnResultReady = false
             ncnnHasValidResult = true
             try {
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
-                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                    ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                // 第一次用 glTexImage2D 初始化纹理，后续用 glTexSubImage2D 更新（更快）
+                GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0,
+                    ncnnResultWidth, ncnnResultHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
                     java.nio.ByteBuffer.wrap(ncnnResultBytes))
             } catch (e: Exception) {
-                AndroidLog.e("SharpenVideoRenderer", "NCNN upload failed: ${e.message}")
+                // glTexSubImage2D 可能因为尺寸不匹配失败，回退到 glTexImage2D
+                try {
+                    GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                        ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                        java.nio.ByteBuffer.wrap(ncnnResultBytes))
+                } catch (_: Exception) {}
             }
         }
 
@@ -321,21 +327,11 @@ class SharpenVideoRenderer(
             }
         }
 
-        // 3. 渲染到屏幕
-        if (ncnnHasValidResult && ncnnResultBytes != null) {
-            // 诊断日志（每 30 帧打一次）
-            if (frameCount % 30 == 0) {
-                val b = ncnnResultBytes!!
-                AndroidLog.e("NCNN_DIAG", "render: texId=$ncnnOutputTexId w=$ncnnResultWidth h=$ncnnResultHeight bytes=${b.size} first4=[${b[0]},${b[1]},${b[2]},${b[3]}] prog=${blitProgramForNcnn != null}")
-            }
+        // 3. 渲染到屏幕（不再每帧重新上传纹理，只在有新结果时上传）
+        if (ncnnHasValidResult) {
             val view = glSurfaceViewRef?.get()
             if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
-            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
-                java.nio.ByteBuffer.wrap(ncnnResultBytes))
 
             blitProgramForNcnn?.let { p ->
                 p.use()
