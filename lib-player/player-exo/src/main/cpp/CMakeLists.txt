@@ -58,3 +58,4 @@ target_link_libraries(ncnn-sr
 )
 
 set_target_properties(ncnn-sr PROPERTIES CXX_STANDARD 14)
+target_compile_options(ncnn-sr PRIVATE -fexceptions -frtti)

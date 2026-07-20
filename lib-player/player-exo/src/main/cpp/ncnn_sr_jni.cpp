@@ -75,6 +75,7 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
 {
     if (!sr_loaded) return nullptr;
 
+    try {
     // 1. RGBA → ncnn::Mat (RGB)
     jbyte* in = env->GetByteArrayElements(inputData, nullptr);
     ncnn::Mat in_mat = ncnn::Mat::from_pixels(
@@ -123,6 +124,14 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
 
     LOGI("infer OK: returning %dx%d RGBA", outW, outH);
     return result;
+
+    } catch (const std::exception& e) {
+        LOGE("NCNN infer exception: %s", e.what());
+        return nullptr;
+    } catch (...) {
+        LOGE("NCNN infer unknown exception");
+        return nullptr;
+    }
 }
 
 JNIEXPORT void JNICALL
