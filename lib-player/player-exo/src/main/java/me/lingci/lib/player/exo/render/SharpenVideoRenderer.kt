@@ -278,9 +278,6 @@ class SharpenVideoRenderer(
             ncnnInferInProgress = false
         }
     }
-            ncnnInferInProgress = false
-        }
-    }
 
     /** Pass 1: OES → RGBA FBO */
     private fun blitOesToFbo() {
