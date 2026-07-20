@@ -616,7 +616,8 @@ class ShortVideoActivity : BaseActivity() {
             applyShortVideoRenderFactory()
         }
         DyPlayerCoreRegistry.applyCore(mVideoView, spUtil.shortDyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution)
-        if (!spUtil.sortRender) {
+        // 画质增强开启时保留 applyCore 设的 GlRenderViewFactory，不要被 TextureRenderView 覆盖
+        if (!spUtil.sortRender && !spUtil.labMpvSuperResolution) {
             mVideoView.setRenderViewFactory(TextureRenderViewFactory.create())
             mVideoView.setScreenScaleType(VideoView.SCREEN_SCALE_DEFAULT)
         }
