@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.18)
 project("ncnn-sr")
 
+# 只编译有 NCNN 库的 ABI
+if(NOT ANDROID_ABI STREQUAL "arm64-v8a" AND NOT ANDROID_ABI STREQUAL "x86_64")
+    # 对没有 NCNN 库的 ABI（如 armeabi-v7a），创建空的占位 .so
+    # 这样不会阻止其他 ABI 的 APK 构建
+    add_library(ncnn-sr SHARED ncnn_sr_stub.cpp)
+    return()
+endif()
+
 set(NCNN_DIR "${CMAKE_SOURCE_DIR}/../jni/ncnn/${ANDROID_ABI}")
 
 # NCNN 头文件
