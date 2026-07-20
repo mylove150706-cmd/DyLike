@@ -84,9 +84,6 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInferAlloc(
     // 2. NCNN 推理
     ncnn::Extractor ex = sr_net.create_extractor();
     ex.set_light_mode(false);
-    if (sr_net.opt.use_vulkan_compute) {
-        ex.set_vulkan_compute(true);
-    }
 
     int ret_in = ex.input("data", in_mat);
     if (ret_in != 0) {
