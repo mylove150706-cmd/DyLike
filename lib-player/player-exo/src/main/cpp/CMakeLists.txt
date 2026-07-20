@@ -10,18 +10,21 @@ endif()
 set(NCNN_DIR "${CMAKE_SOURCE_DIR}/../jni/ncnn/${ANDROID_ABI}")
 include_directories(${NCNN_DIR}/include)
 
-# NCNN 核心库（自编译版：NCNN_OPENMP=OFF + NCNN_VULKAN=OFF）
-# 不需要 OpenMP、glslang、SPIRV 等依赖
+# NCNN 核心库
 add_library(libncnn STATIC IMPORTED)
 set_target_properties(libncnn PROPERTIES IMPORTED_LOCATION ${NCNN_DIR}/lib/libncnn.a)
 
 add_library(ncnn-sr SHARED ncnn_sr_jni.cpp)
+
+# OpenMP（NCNN 编译时启用了 OpenMP）
+find_package(OpenMP REQUIRED)
 
 find_library(log-lib log)
 find_library(android-lib android)
 
 target_link_libraries(ncnn-sr
     libncnn
+    OpenMP::OpenMP_CXX
     ${log-lib}
     ${android-lib}
 )

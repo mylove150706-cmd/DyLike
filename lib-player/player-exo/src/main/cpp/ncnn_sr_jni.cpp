@@ -34,13 +34,17 @@ Java_me_lingci_lib_player_exo_ncnn_NcnnSuperResolution_nativeInit(
     const char* param = env->GetStringUTFChars(paramPath, nullptr);
     const char* bin   = env->GetStringUTFChars(binPath,   nullptr);
 
-    sr_net.opt.num_threads = 1;
+    // 禁用 OpenMP affinity（荣耀设备上会崩溃）
+    setenv("KMP_AFFINITY", "disabled", 1);
+    setenv("OMP_PROC_BIND", "false", 1);
+
+    sr_net.opt.num_threads = 4;
     sr_net.opt.use_fp16_packed     = true;
     sr_net.opt.use_winograd_convolution = true;
     sr_net.opt.use_sgemm_convolution = true;
     sr_net.opt.use_vulkan_compute = false;
 
-    LOGI("Using single-thread CPU inference with NDK OpenMP");
+    LOGI("Using 4-thread CPU inference (NCNN_OPENMP=ON, NDK r27c OpenMP, KMP_AFFINITY=disabled)");
 
     AAssetManager* mgr = AAssetManager_fromJava(env, assetManager);
     if (!mgr) {
