@@ -310,10 +310,16 @@ class SharpenVideoRenderer(
         }
 
         // 3. 渲染到屏幕
-        if (ncnnHasValidResult) {
+        if (ncnnHasValidResult && ncnnResultBytes != null) {
             val view = glSurfaceViewRef?.get()
             if (view != null) GLES20.glViewport(0, 0, view.width, view.height)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+
+            // 每帧都重新上传纹理（确保纹理内容是最新的 NCNN 结果）
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ncnnOutputTexId)
+            GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                ncnnResultWidth, ncnnResultHeight, 0, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE,
+                java.nio.ByteBuffer.wrap(ncnnResultBytes))
 
             blitProgramForNcnn?.let { p ->
                 p.use()
