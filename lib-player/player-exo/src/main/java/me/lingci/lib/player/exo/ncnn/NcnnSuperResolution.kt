@@ -50,13 +50,14 @@ class NcnnSuperResolution {
         if (!initialized) return null
         return try {
             val result = nativeInferAlloc(input, width, height)
-            if (result != null) {
-                // result = [outW, outH, outW*outH*4 bytes...]
-                val outW = result[0]
-                val outH = result[1]
+            if (result != null && result.size > 8) {
+                // JNI 返回格式: [outW(int32 LE)][outH(int32 LE)][RGBA pixels...]
+                val buf = java.nio.ByteBuffer.wrap(result, 0, 8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                val outW = buf.int
+                val outH = buf.int
                 val pixels = ByteArray(result.size - 8)
                 System.arraycopy(result, 8, pixels, 0, pixels.size)
-                Triple(pixels, outW.toInt(), outH.toInt())
+                Triple(pixels, outW, outH)
             } else null
         } catch (e: Throwable) {
             Log.e(TAG, "infer failed: ${e.message}")
