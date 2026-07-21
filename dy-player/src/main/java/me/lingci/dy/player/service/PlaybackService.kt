@@ -73,8 +73,11 @@ class PlaybackService : Service() {
         this.metadata = metadata
         // setVideoSurface(null) 已在 BaseVideoView.detachPlayerForBackground 中调用
         // 更新 MediaSession + 通知
+        mediaSession?.isActive = true  // M3: 确保每次 takePlayer 都激活 MediaSession
         updateMediaSession(metadata, isPlaying = player.isPlaying)
         updateNotification()
+        // M2: 先释放可能存在的旧 AudioFocus,再重新申请,避免反复 takePlayer 导致 focus 泄漏
+        abandonAudioFocus()
         requestAudioFocus()
         Log.i(TAG, "took player: ${metadata.title}")
     }
