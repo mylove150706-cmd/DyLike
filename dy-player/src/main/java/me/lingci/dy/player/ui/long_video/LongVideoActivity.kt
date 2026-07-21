@@ -31,6 +31,7 @@ import me.lingci.dy.player.core.DyPlayerCore
 import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
+import me.lingci.dy.player.service.PlaybackAction
 import me.lingci.dy.player.service.PlaybackBinder
 import me.lingci.dy.player.service.PlaybackMetadata
 import me.lingci.dy.player.service.PlaybackService
@@ -217,6 +218,44 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     }
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
+
+    /** 通知栏控制广播接收器(后台播放时通知按钮)。 */
+    private val playbackActionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                PlaybackAction.ACTION_PREV -> onPreviousPlay()
+                PlaybackAction.ACTION_NEXT -> onNextPlay()
+                PlaybackAction.ACTION_CLOSE -> {
+                    // 关闭:停止后台播放 + finish
+                    playbackService?.returnPlayer()?.release()
+                    playbackService = null
+                    finish()
+                }
+            }
+        }
+    }
+    private var isPlaybackReceiverRegistered = false
+
+    private fun registerPlaybackActionReceiver() {
+        if (isPlaybackReceiverRegistered) return
+        val filter = android.content.IntentFilter().apply {
+            addAction(PlaybackAction.ACTION_PREV)
+            addAction(PlaybackAction.ACTION_NEXT)
+            addAction(PlaybackAction.ACTION_CLOSE)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(playbackActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(playbackActionReceiver, filter)
+        }
+        isPlaybackReceiverRegistered = true
+    }
+
+    private fun unregisterPlaybackActionReceiver() {
+        if (!isPlaybackReceiverRegistered) return
+        try { unregisterReceiver(playbackActionReceiver) } catch (_: Exception) {}
+        isPlaybackReceiverRegistered = false
+    }
 
     // ===== 后台播放 Service =====
     private var playbackService: PlaybackBinder? = null
@@ -910,6 +949,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
             isBoundToPlaybackService = false
             playbackService = null
+            // 取回 player 后注销通知栏控制广播接收器
+            unregisterPlaybackActionReceiver()
         }
     }
 
@@ -1006,6 +1047,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         // 禁用 view 的音频焦点（Service 接管）
         videoView.setEnableAudioFocus(false)
         Log.d(this, "starting background playback")
+        // 注册通知栏控制广播接收器（PREV/NEXT/CLOSE）
+        registerPlaybackActionReceiver()
     }
 
     /** 在 ServiceConnection.onServiceConnected 中调用：把 player 交给 Service。 */
@@ -1057,6 +1100,8 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         unregisterPipActionReceiver()
         // 注销超分开关广播接收器
         unregisterSuperResolutionReceiver()
+        // 注销通知栏控制广播接收器
+        unregisterPlaybackActionReceiver()
         mediaPlaybackRecorder.release()
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
