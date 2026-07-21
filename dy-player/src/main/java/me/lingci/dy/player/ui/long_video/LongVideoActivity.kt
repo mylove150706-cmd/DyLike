@@ -221,6 +221,12 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     // ===== 后台播放 Service =====
     private var playbackService: PlaybackBinder? = null
     private var isBoundToPlaybackService = false
+    /**
+     * M2 fix: 标记 onStop 已发起后台播放绑定，但 Service 尚未把 player 接走。
+     * onStart 取回前台时清掉；tryEnterBackgroundPlay 必须看到此标记才 detach。
+     * 避免 onServiceConnected 在用户已返回前台后才触发，把 player 错误交给 Service。
+     */
+    private var pendingBackgroundEntry = false
     private val playbackServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             playbackService = service as? PlaybackBinder
@@ -890,6 +896,9 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onStart() {
         super.onStart()
+        // M2 fix: 用户已返回前台，清除“待进入后台”标记。
+        // 即使 onServiceConnected 这时才触发，tryEnterBackgroundPlay 也会因此跳过 detach。
+        pendingBackgroundEntry = false
         // 如果 Service 持有 player，取回
         if (isBoundToPlaybackService && playbackService?.isHoldingPlayer == true) {
             val player = playbackService?.returnPlayer()
@@ -938,14 +947,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             return
         }
         rememberPlaybackPosition(videoView.currentPosition)
-        danmakuView.pause()
-        videoView.pause()
+        // 后台恢复相关状态：无论接下来是否暂停，重置都安全。
         clearBackgroundRecoveryState()
         hasPausedForBackgroundRecovery = true
         // 重置重试标记，下次从后台回来允许重试一次 // track-id: bg-retry-20260421
         hasAutoRetriedOnResume = false
         // 重置自动重试后暂停标记 // track-id: bg-retry-20260421
         shouldPauseAfterAutoRetry = false
+        // M1 fix: 若即将进入后台播放（onStop 会 detach player 交给 Service），不要在这里暂停——
+        // 否则 onStop 里 shouldEnterBackgroundPlay() 会因状态已被改为 STATE_PAUSED 而被跳过，
+        // 后台播放功能在非 PiP 路径下会静默失效。
+        // 弹幕也要保持播放（音频继续），由 onStart 取回 player 时再统一恢复。
+        if (!isChangingConfigurations && !userInitiatedExit
+            && videoView.currentPlayState == VideoView.STATE_PLAYING && videoView.hasPlayer()) {
+            Log.d(this, "onPause skip pause: pending background play")
+            return
+        }
+        danmakuView.pause()
+        videoView.pause()
     }
 
     override fun onStop() {
@@ -981,6 +1000,9 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         }
         bindService(intent, playbackServiceConnection, Context.BIND_AUTO_CREATE)
         isBoundToPlaybackService = true
+        // M2 fix: 标记正在等待 onServiceConnected → tryEnterBackgroundPlay。
+        // onStart 会清除此标记；如果 Service 回调这时才到，说明用户已返回前台，应放弃 detach。
+        pendingBackgroundEntry = true
         // 禁用 view 的音频焦点（Service 接管）
         videoView.setEnableAudioFocus(false)
         Log.d(this, "starting background playback")
@@ -989,6 +1011,20 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     /** 在 ServiceConnection.onServiceConnected 中调用：把 player 交给 Service。 */
     private fun tryEnterBackgroundPlay() {
         val binder = playbackService ?: return
+        // M2 fix: 若用户在 Service 连上之前已通过 onStart 返回前台，
+        // pendingBackgroundEntry 会被清除——此时不能 detach，否则会把前台播放的 player 错误交给 Service，
+        // 导致画面冻结+误显示后台通知。直接解绑并退出，让前台继续播放。
+        if (!pendingBackgroundEntry) {
+            Log.d(this, "abort background entry: user already returned to foreground")
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+            playbackService = null
+            // Service 未持有 player，调用 stopForegroundAndNotification 让其自停
+            binder.stopForegroundAndNotification()
+            videoView.setEnableAudioFocus(true)
+            return
+        }
+        pendingBackgroundEntry = false
         val player = videoView.detachPlayer() ?: return
         val metadata = PlaybackMetadata(
             title = currentTitle,
