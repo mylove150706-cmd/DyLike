@@ -102,6 +102,15 @@ class PlaybackService : Service() {
         mediaSession?.isActive = false
     }
 
+    /**
+     * 用户从最近任务列表划掉 app 时调用。
+     * 全局约束:划掉 app = 停止播放(不跨进程)。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         // 如果 Service 被销毁时仍持有 player(Activity 异常销毁),释放它
