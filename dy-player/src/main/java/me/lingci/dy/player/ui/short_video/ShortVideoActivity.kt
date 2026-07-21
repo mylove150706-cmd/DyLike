@@ -1,12 +1,21 @@
 package me.lingci.dy.player.ui.short_video
 
+import android.app.PictureInPictureParams
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
+import android.os.IBinder
 import android.os.Bundle
 import android.util.Log
+import android.util.Rational
 import android.view.View
 import androidx.activity.OnBackPressedCallback
+import androidx.annotation.RequiresApi
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.RecyclerView
@@ -21,6 +30,10 @@ import me.lingci.dy.player.core.DyPlayerCore
 import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
+import me.lingci.dy.player.service.PlaybackAction
+import me.lingci.dy.player.service.PlaybackBinder
+import me.lingci.dy.player.service.PlaybackMetadata
+import me.lingci.dy.player.service.PlaybackService
 import me.lingci.dy.player.ui.long_video.PlayHelper
 import me.lingci.dy.player.util.AppUtil
 import me.lingci.dy.player.util.AppUtil.removeViewFormParent
@@ -46,6 +59,7 @@ import me.lingci.lib.base.util.logD
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.base.util.safeGetParcelableArrayList
 import me.lingci.lib.player.danmaku.PlayerInitializer
+import me.lingci.dy.player.ui.long_video.PiPActionReceiver
 import me.lingci.lib.player.subtitle.SubtitleCueProvider
 import me.lingci.lib.player.track.ExternalTrackController
 import me.lingci.lib.player.widget.component.SubtitleControlView
@@ -218,6 +232,82 @@ class ShortVideoActivity : BaseActivity() {
     // 字幕停靠几何计算较重，拆出后 Activity 只在时机点触发刷新。
     private lateinit var subtitleDockController: SubtitleDockController
 
+    // ===== PiP 画中画相关状态 =====
+    /** PiP 操作按钮广播接收器 */
+    private val pipActionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                PiPActionReceiver.ACTION_PREV -> onPreviousShortVideo()
+                PiPActionReceiver.ACTION_PLAY_PAUSE -> togglePlayPause()
+                PiPActionReceiver.ACTION_NEXT -> onNextShortVideo()
+            }
+        }
+    }
+    /** 标记 PiP 广播接收器是否已注册 */
+    private var isPipReceiverRegistered = false
+
+    // ===== 后台播放 Service =====
+    private var playbackService: PlaybackBinder? = null
+    private var isBoundToPlaybackService = false
+    /**
+     * M2 fix: 标记 onStop 已发起后台播放绑定，但 Service 尚未把 player 接走。
+     * onStart 取回前台时清掉；tryEnterBackgroundPlay 必须看到此标记才 detach。
+     * 避免 onServiceConnected 在用户已返回前台后才触发，把 player 错误交给 Service。
+     */
+    private var pendingBackgroundEntry = false
+    private val playbackServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            playbackService = service as? PlaybackBinder
+            // Service 连上后，把 player 交给它
+            tryEnterBackgroundPlay()
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playbackService = null
+            isBoundToPlaybackService = false
+        }
+    }
+
+    /** 通知栏控制广播接收器(后台播放时通知按钮)。 */
+    private val playbackActionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                PlaybackAction.ACTION_PREV -> onPreviousShortVideo()
+                PlaybackAction.ACTION_NEXT -> onNextShortVideo()
+                PlaybackAction.ACTION_CLOSE -> {
+                    // 关闭:停止后台播放 + finish
+                    playbackService?.returnPlayer()?.release()
+                    playbackService = null
+                    finish()
+                }
+            }
+        }
+    }
+    private var isPlaybackReceiverRegistered = false
+
+    private fun registerPlaybackActionReceiver() {
+        if (isPlaybackReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(PlaybackAction.ACTION_PREV)
+            addAction(PlaybackAction.ACTION_NEXT)
+            addAction(PlaybackAction.ACTION_CLOSE)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(playbackActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(playbackActionReceiver, filter)
+        }
+        isPlaybackReceiverRegistered = true
+    }
+
+    private fun unregisterPlaybackActionReceiver() {
+        if (!isPlaybackReceiverRegistered) return
+        try { unregisterReceiver(playbackActionReceiver) } catch (_: Exception) {}
+        isPlaybackReceiverRegistered = false
+    }
+
+    /** 标记：用户主动按返回退出（不进后台） */
+    private var userInitiatedExit = false
+
     private fun getExternalTrackController(): ExternalTrackController? {
         return mVideoView.getPlayerCapability(ExternalTrackController::class.java)
     }
@@ -320,6 +410,7 @@ class ShortVideoActivity : BaseActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                userInitiatedExit = true
                 if (!::mVideoView.isInitialized || !mVideoView.onBackPressed()) {
                     finish()
                 }
@@ -936,21 +1027,203 @@ class ShortVideoActivity : BaseActivity() {
 
     override fun onPause() {
         super.onPause()
+        // PiP 模式下不暂停，保持小窗继续播放
+        if (isInPictureInPictureMode) {
+            return
+        }
+        // M1 fix: 若即将进入后台播放（onStop 会 detach player 交给 Service），不要在这里暂停——
+        // 否则 onStop 里 shouldEnterBackgroundPlay() 会因状态已被改为 STATE_PAUSED 而被跳过，
+        // 后台播放功能在非 PiP 路径下会静默失效。
+        if (!isChangingConfigurations && !userInitiatedExit && ::mVideoView.isInitialized
+            && mVideoView.currentPlayState == VideoView.STATE_PLAYING && mVideoView.hasPlayer()) {
+            logAndCache(TAG, "D", "onPause skip pause: pending background play")
+            return
+        }
         if (::mVideoView.isInitialized) {
             mVideoView.pause()
         }
         timerCloseController.onPause()
     }
 
+    override fun onStart() {
+        super.onStart()
+        // M2 fix: 用户已返回前台，清除"待进入后台"标记。
+        // 即使 onServiceConnected 这时才触发，tryEnterBackgroundPlay 也会因此跳过 detach。
+        pendingBackgroundEntry = false
+        // 如果 Service 持有 player，取回并重新挂到当前页容器
+        if (isBoundToPlaybackService && playbackService?.isHoldingPlayer == true) {
+            val player = playbackService?.returnPlayer()
+            if (player != null && ::mVideoView.isInitialized) {
+                mVideoView.attachPlayer(player)
+                mVideoView.setEnableAudioFocus(true)
+                // 重新把 mVideoView 加回当前页的 playerContainer（detach 时已 removeViewFormParent）
+                attachVideoViewToCurrentHolder()
+                logAndCache(TAG, "D", "resumed from background, player reattached")
+            }
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+            playbackService = null
+            // 恢复 ViewPager2 滑动
+            mBinding.viewpage2.isUserInputEnabled = true
+            // 取回 player 后注销通知栏控制广播接收器
+            unregisterPlaybackActionReceiver()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // 用户主动退出 → 不进后台
+        if (userInitiatedExit) {
+            userInitiatedExit = false
+            return
+        }
+        // 旋屏等配置变化 → 不进后台
+        if (isChangingConfigurations) return
+        // 正在 PiP → 不进后台（PiP 期间 Activity 仍可见）
+        if (isInPictureInPictureMode) return
+        // 播放中 + 未暂停 → 进入后台播放模式
+        if (shouldEnterBackgroundPlay()) {
+            startPlaybackService()
+        }
+    }
+
+    /** 后台播放触发条件：播放中 + 有 player。 */
+    private fun shouldEnterBackgroundPlay(): Boolean {
+        if (!::mVideoView.isInitialized) return false
+        return mVideoView.currentPlayState == VideoView.STATE_PLAYING && mVideoView.hasPlayer()
+    }
+
+    /** 启动并绑定 PlaybackService。 */
+    private fun startPlaybackService() {
+        val intent = Intent(this, PlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        bindService(intent, playbackServiceConnection, Context.BIND_AUTO_CREATE)
+        isBoundToPlaybackService = true
+        // M2 fix: 标记正在等待 onServiceConnected → tryEnterBackgroundPlay。
+        // onStart 会清除此标记；如果 Service 回调这时才到，说明用户已返回前台，应放弃 detach。
+        pendingBackgroundEntry = true
+        // 禁用 view 的音频焦点（Service 接管）
+        mVideoView.setEnableAudioFocus(false)
+        logAndCache(TAG, "D", "starting background playback")
+        // 后台时禁止 ViewPager2 滑动
+        mBinding.viewpage2.isUserInputEnabled = false
+        // 注册通知栏控制广播接收器（PREV/NEXT/CLOSE）
+        registerPlaybackActionReceiver()
+    }
+
+    /** 在 ServiceConnection.onServiceConnected 中调用：把 player 交给 Service。 */
+    private fun tryEnterBackgroundPlay() {
+        val binder = playbackService ?: return
+        // M2 fix: 若用户在 Service 连上之前已通过 onStart 返回前台，
+        // pendingBackgroundEntry 会被清除——此时不能 detach，否则会把前台播放的 player 错误交给 Service，
+        // 导致画面冻结+误显示后台通知。直接解绑并退出，让前台继续播放。
+        if (!pendingBackgroundEntry) {
+            logAndCache(TAG, "D", "abort background entry: user already returned to foreground")
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+            playbackService = null
+            binder.stopForegroundAndNotification()
+            if (::mVideoView.isInitialized) {
+                mVideoView.setEnableAudioFocus(true)
+            }
+            return
+        }
+        pendingBackgroundEntry = false
+        // 短视频：先从 ViewPager2 container detach view，再 detach player
+        removeViewFormParent(mVideoView)
+        val player = mVideoView.detachPlayer() ?: return
+        val metadata = PlaybackMetadata(
+            title = currentShortVideoTitle,
+            subtitle = "第 ${mCurPos + 1} 个",
+            duration = mVideoView.duration,
+            currentPosition = mVideoView.currentPosition
+        )
+        binder.takePlayer(player, metadata)
+    }
+
+    /** 当前短视频标题（用于 PiP / 后台通知栏）。 */
+    private val currentShortVideoTitle: String
+        get() {
+            return if (mCurPos in mVideoList.indices) {
+                formatShortTitle(mVideoList[mCurPos].name).ifBlank { "短视频" }
+            } else {
+                "短视频"
+            }
+        }
+
+    /** 把 mVideoView 重新加回当前页 ViewHolder 的 playerContainer。 */
+    private fun attachVideoViewToCurrentHolder() {
+        if (!::mVideoView.isInitialized || !::mViewPagerImpl.isInitialized) return
+        if (mCurPos !in mVideoList.indices) return
+        // 如果 mVideoView 已经在某个父容器里，不重复添加
+        if (mVideoView.parent != null) return
+        val count = mViewPagerImpl.childCount
+        for (i in 0 until count) {
+            val itemView = mViewPagerImpl.getChildAt(i)
+            val viewHolder = itemView.tag as? ShortVideoAdapter.ViewHolder ?: continue
+            if (viewHolder.bindingAdapterPosition == mCurPos) {
+                viewHolder.playerContainer.addView(mVideoView, 0)
+                break
+            }
+        }
+    }
+
+    /** 上一个短视频（PiP/通知栏）。 */
+    private fun onPreviousShortVideo() {
+        if (mCurPos - 1 >= 0) {
+            isUserScroll.set(false)
+            val currentIndex = mCurPos - 1
+            mBinding.viewpage2.setCurrentItem(currentIndex, false)
+            mBinding.viewpage2.postDelayed({ startPlay(currentIndex) }, 30)
+        }
+    }
+
+    /** 下一个短视频（PiP/通知栏）。 */
+    private fun onNextShortVideo() {
+        if (mCurPos + 1 < mShortVideoAdapter.itemCount) {
+            isUserScroll.set(false)
+            val currentIndex = mCurPos + 1
+            mBinding.viewpage2.setCurrentItem(currentIndex, false)
+            mBinding.viewpage2.postDelayed({ startPlay(currentIndex) }, 30)
+        }
+    }
+
+    /** 切换播放/暂停（PiP）。 */
+    private fun togglePlayPause() {
+        if (!::mVideoView.isInitialized) return
+        if (mVideoView.isPlaying) {
+            mVideoView.pause()
+        } else {
+            mVideoView.start()
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            updatePipActions()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        // 注销 PiP / 后台 / 超分 广播接收器
+        unregisterPipActionReceiver()
+        unregisterPlaybackActionReceiver()
+        unregisterSuperResolutionReceiver()
         mediaPlaybackRecorder.release()
         timerCloseController.release()
         activeShortVideoControlView?.setOnVideoTransformChangedListener(null)
+        // 如果 Service 还持有 player（Activity 异常销毁），取回并释放
+        if (isBoundToPlaybackService) {
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+        }
+        playbackService?.returnPlayer()?.release()
+        playbackService = null
         if (::mVideoView.isInitialized) {
             mVideoView.release()
         }
-        unregisterSuperResolutionReceiver()
         clearSurfaceTrace()
         playbackLogCache.clear()
     }
@@ -958,6 +1231,167 @@ class ShortVideoActivity : BaseActivity() {
     private fun closeApp() {
         mVideoView.release()
         finishAffinity()
+    }
+
+    // ===== PiP 画中画模式实现 =====
+
+    /**
+     * 用户离开 Activity 时触发（按 Home 键等）。
+     * 若短视频正在播放且系统支持 PiP，则进入竖屏 9:16 小窗模式。
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && shouldEnterPip()) {
+            enterPiPMode()
+        }
+    }
+
+    /**
+     * 判断是否应该进入 PiP 模式。
+     * 需同时满足：用户开启 PiP 开关、系统支持 PiP、视频处于播放中状态。
+     * 复用长视频的 PiP 开关（spUtil.longVideoPip）。
+     */
+    private fun shouldEnterPip(): Boolean {
+        if (!spUtil.longVideoPip) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            return false
+        }
+        if (!::mVideoView.isInitialized) return false
+        return mVideoView.currentPlayState == VideoView.STATE_PLAYING
+    }
+
+    /** 进入 PiP 画中画模式，强制使用 9:16 竖屏比例（短视频标准比例）。 */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun enterPiPMode() {
+        val params = PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(9, 16))
+            .setActions(buildPipActions())
+            .build()
+        enterPictureInPictureMode(params)
+    }
+
+    /**
+     * PiP 模式切换回调。
+     * 进入 PiP 时禁止 ViewPager2 滑动并隐藏控制器；退出时恢复。
+     */
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode)
+        // PiP 时禁止 ViewPager2 滑动
+        mBinding.viewpage2.isUserInputEnabled = !isInPictureInPictureMode
+        if (isInPictureInPictureMode) {
+            enterPipUiState()
+        } else {
+            exitPipUiState()
+            // PiP 退出后不主动 pause —— 让 onStop 决定是进后台还是正常暂停
+        }
+    }
+
+    /** 进入 PiP 模式时的 UI 调整：隐藏控制器，注册 PiP 按钮。 */
+    private fun enterPipUiState() {
+        mController.hide()
+        registerPipActionReceiver()
+    }
+
+    /** 退出 PiP 模式时的 UI 恢复：注销接收器。 */
+    private fun exitPipUiState() {
+        unregisterPipActionReceiver()
+    }
+
+    /**
+     * 构建 PiP 窗口操作按钮列表（最多3个）：上一个 / 播放暂停 / 下一个。
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun buildPipActions(): List<android.app.RemoteAction> {
+        val actions = mutableListOf<android.app.RemoteAction>()
+        // 上一个
+        actions.add(
+            createRemoteAction(
+                me.lingci.lib.player.ui.R.drawable.ic_skip_previous,
+                "上一个",
+                PiPActionReceiver.ACTION_PREV,
+                PiPActionReceiver.REQUEST_PREV
+            )
+        )
+        // 播放/暂停
+        val playPauseIcon = if (mVideoView.isPlaying) {
+            me.lingci.lib.player.ui.R.drawable.ic_pause_24
+        } else {
+            me.lingci.lib.player.ui.R.drawable.ic_play_arrow_24
+        }
+        actions.add(
+            createRemoteAction(
+                playPauseIcon,
+                "播放/暂停",
+                PiPActionReceiver.ACTION_PLAY_PAUSE,
+                PiPActionReceiver.REQUEST_PLAY_PAUSE
+            )
+        )
+        // 下一个
+        actions.add(
+            createRemoteAction(
+                me.lingci.lib.player.ui.R.drawable.ic_skip_next,
+                "下一个",
+                PiPActionReceiver.ACTION_NEXT,
+                PiPActionReceiver.REQUEST_NEXT
+            )
+        )
+        return actions
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun createRemoteAction(
+        iconRes: Int,
+        title: String,
+        action: String,
+        requestCode: Int
+    ): android.app.RemoteAction {
+        val intent = Intent(action).setPackage(packageName)
+        val pendingIntent = android.app.PendingIntent.getBroadcast(
+            this, requestCode, intent,
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+        return android.app.RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(this, iconRes),
+            title,
+            title,
+            pendingIntent
+        )
+    }
+
+    /** 刷新 PiP 窗口的操作按钮（播放/暂停图标随状态切换）。 */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun updatePipActions() {
+        if (isInPictureInPictureMode) {
+            val params = PictureInPictureParams.Builder()
+                .setActions(buildPipActions())
+                .build()
+            setPictureInPictureParams(params)
+        }
+    }
+
+    /** 注册 PiP 操作按钮广播接收器。 */
+    private fun registerPipActionReceiver() {
+        if (isPipReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(PiPActionReceiver.ACTION_PREV)
+            addAction(PiPActionReceiver.ACTION_PLAY_PAUSE)
+            addAction(PiPActionReceiver.ACTION_NEXT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pipActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(pipActionReceiver, filter)
+        }
+        isPipReceiverRegistered = true
+    }
+
+    /** 注销 PiP 操作按钮广播接收器。 */
+    private fun unregisterPipActionReceiver() {
+        if (isPipReceiverRegistered) {
+            try { unregisterReceiver(pipActionReceiver) } catch (_: Exception) {}
+            isPipReceiverRegistered = false
+        }
     }
 
 }
