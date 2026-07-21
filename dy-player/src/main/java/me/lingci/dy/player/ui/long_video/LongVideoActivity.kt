@@ -50,6 +50,7 @@ import me.lingci.lib.base.util.AppFile
 import me.lingci.lib.base.util.FileOperator
 import me.lingci.lib.base.util.Log
 import me.lingci.lib.base.util.logD
+import me.lingci.lib.base.util.md5
 import me.lingci.lib.base.util.safeGetParcelable
 import me.lingci.lib.player.danmaku.PlayerInitializer
 import me.lingci.lib.player.exo.CustomExoMediaPlayer
@@ -1085,7 +1086,50 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             duration = videoView.duration,
             currentPosition = videoView.currentPosition
         )
-        binder.takePlayer(player, metadata)
+        // Task 8: 先用 null 封面 takePlayer(立即显示标题),再异步加载封面后 updateMetadata。
+        binder.takePlayer(player, metadata.copy(coverBitmap = null))
+        loadCoverBitmap(currentCoverUrl) { bitmap ->
+            if (bitmap != null) {
+                playbackService?.updateMetadata(metadata.copy(coverBitmap = bitmap))
+            }
+        }
+    }
+
+    /**
+     * 当前视频封面 URL(Task 8):优先用本地 thumb(已通过 saveThumb 缓存),
+     * 回退到视频源 preview 字段;都没有则返回 null(通知仍可正常显示)。
+     */
+    private val currentCoverUrl: String?
+        get() {
+            if (itemViewModel.getItemSize() <= mCurPos) return null
+            val videoData = itemViewModel.getItem(mCurPos)
+            val thumbFile = AppFile(this)
+                .buildCache(".thumb/${videoData.videoUrl.md5()}.${AppUtil.THUMB_TYPE}")
+            if (thumbFile.exists() && thumbFile.isFile && thumbFile.length() > 0L) {
+                return thumbFile.path
+            }
+            return videoData.preview.takeIf { it.isNotBlank() }
+        }
+
+    /**
+     * 用 Glide 异步加载封面 Bitmap,加载完成后回调到主线程。
+     * submit().get() 阻塞,必须在后台线程执行。
+     */
+    private fun loadCoverBitmap(url: String?, callback: (android.graphics.Bitmap?) -> Unit) {
+        if (url.isNullOrBlank()) { callback(null); return }
+        Thread {
+            try {
+                val bitmap = com.bumptech.glide.Glide.with(this)
+                    .asBitmap()
+                    .load(url)
+                    .submit(256, 256)
+                    .get()
+                runOnUiThread { callback(bitmap) }
+            } catch (e: Exception) {
+                Log.d(this, "loadCoverBitmap failed: ${e.message}")
+                runOnUiThread { callback(null) }
+            }
+        }.start()
     }
 
     /** 当前视频标题（用于后台通知栏）。 */
