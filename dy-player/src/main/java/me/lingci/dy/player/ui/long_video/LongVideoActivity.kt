@@ -223,8 +223,18 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private val playbackActionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                PlaybackAction.ACTION_PREV -> onPreviousPlay()
-                PlaybackAction.ACTION_NEXT -> onNextPlay()
+                PlaybackAction.ACTION_PREV, PlaybackAction.ACTION_NEXT -> {
+                    // C1 fix: 后台模式下禁止切集(Service 已持有 player)。
+                    // 直接 startPlay() 会创建第二个 player → 双音频/状态错乱。
+                    // 用户需返回 app 切换视频。
+                    if (playbackService?.isHoldingPlayer != true) {
+                        if (intent?.action == PlaybackAction.ACTION_PREV) {
+                            onPreviousPlay()
+                        } else {
+                            onNextPlay()
+                        }
+                    }
+                }
                 PlaybackAction.ACTION_CLOSE -> {
                     // 关闭:停止后台播放 + finish
                     playbackService?.returnPlayer()?.release()

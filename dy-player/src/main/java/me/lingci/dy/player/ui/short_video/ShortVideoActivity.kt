@@ -271,8 +271,19 @@ class ShortVideoActivity : BaseActivity() {
     private val playbackActionReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                PlaybackAction.ACTION_PREV -> onPreviousShortVideo()
-                PlaybackAction.ACTION_NEXT -> onNextShortVideo()
+                PlaybackAction.ACTION_PREV, PlaybackAction.ACTION_NEXT -> {
+                    // C1 fix: 后台模式下禁止切换短视频(Service 已持有 player)。
+                    // 此时 mVideoView 没有 player 但 playState 仍为 STATE_PLAYING,
+                    // 直接走 startPlay() 会创建第二个 ExoPlayer → 双音频/状态错乱。
+                    // 用户需返回 app 切换视频。
+                    if (playbackService?.isHoldingPlayer != true) {
+                        if (intent?.action == PlaybackAction.ACTION_PREV) {
+                            onPreviousShortVideo()
+                        } else {
+                            onNextShortVideo()
+                        }
+                    }
+                }
                 PlaybackAction.ACTION_CLOSE -> {
                     // 关闭:停止后台播放 + finish
                     playbackService?.returnPlayer()?.release()
