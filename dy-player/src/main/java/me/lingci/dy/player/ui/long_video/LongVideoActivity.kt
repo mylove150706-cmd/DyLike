@@ -1,12 +1,15 @@
 package me.lingci.dy.player.ui.long_video
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
+import android.os.IBinder
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
 import android.content.pm.PackageManager
@@ -28,6 +31,9 @@ import me.lingci.dy.player.core.DyPlayerCore
 import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
+import me.lingci.dy.player.service.PlaybackBinder
+import me.lingci.dy.player.service.PlaybackMetadata
+import me.lingci.dy.player.service.PlaybackService
 import me.lingci.dy.player.util.AppUtil
 import me.lingci.dy.player.util.ExternalSubtitleLoader
 import me.lingci.dy.player.util.MediaPlaybackRecorder
@@ -212,6 +218,24 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     /** 标记 PiP 广播接收器是否已注册 */
     private var isPipReceiverRegistered = false
 
+    // ===== 后台播放 Service =====
+    private var playbackService: PlaybackBinder? = null
+    private var isBoundToPlaybackService = false
+    private val playbackServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            playbackService = service as? PlaybackBinder
+            // Service 连上后，把 player 交给它
+            tryEnterBackgroundPlay()
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playbackService = null
+            isBoundToPlaybackService = false
+        }
+    }
+
+    /** 标记：用户主动按返回退出（不进后台） */
+    private var userInitiatedExit = false
+
     // 超分开关广播接收器：收到 ON/OFF 时写 SP 并重播当前视频以应用新的 render view。
     // 注意：GLSurfaceView 不能热切换，必须重建 player。
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
@@ -384,6 +408,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         initVideoListener()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                userInitiatedExit = true
                 finish()
                 /*if (!videoView.onBackPressed()) {
                     finish()
@@ -863,6 +888,22 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         ExternalSubtitleLoader.clearCueListener(getSubtitleCueProvider())
     }
 
+    override fun onStart() {
+        super.onStart()
+        // 如果 Service 持有 player，取回
+        if (isBoundToPlaybackService && playbackService?.isHoldingPlayer == true) {
+            val player = playbackService?.returnPlayer()
+            if (player != null) {
+                videoView.attachPlayer(player)
+                videoView.setEnableAudioFocus(true)
+                Log.d(this, "resumed from background, player reattached")
+            }
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+            playbackService = null
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         // 标记后台返回后的短暂恢复窗口，仅在该窗口内允许 STATE_ERROR 自动重试 // track-id: bg-retry-20260421
@@ -907,6 +948,73 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         shouldPauseAfterAutoRetry = false
     }
 
+    override fun onStop() {
+        super.onStop()
+        // 用户主动退出 → 不进后台
+        if (userInitiatedExit) {
+            userInitiatedExit = false
+            return
+        }
+        // 旋屏等配置变化 → 不进后台
+        if (isChangingConfigurations) return
+        // 正在 PiP → 不进后台（PiP 期间 Activity 仍可见）
+        if (isInPictureInPictureMode) return
+        // 播放中 + 未暂停 → 进入后台播放模式
+        if (shouldEnterBackgroundPlay()) {
+            startPlaybackService()
+        }
+    }
+
+    /** 后台播放触发条件：播放中 + 未暂停 + 有 player。 */
+    private fun shouldEnterBackgroundPlay(): Boolean {
+        return videoView.currentPlayState == VideoView.STATE_PLAYING
+            && videoView.hasPlayer()
+    }
+
+    /** 启动并绑定 PlaybackService。 */
+    private fun startPlaybackService() {
+        val intent = Intent(this, PlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        bindService(intent, playbackServiceConnection, Context.BIND_AUTO_CREATE)
+        isBoundToPlaybackService = true
+        // 禁用 view 的音频焦点（Service 接管）
+        videoView.setEnableAudioFocus(false)
+        Log.d(this, "starting background playback")
+    }
+
+    /** 在 ServiceConnection.onServiceConnected 中调用：把 player 交给 Service。 */
+    private fun tryEnterBackgroundPlay() {
+        val binder = playbackService ?: return
+        val player = videoView.detachPlayer() ?: return
+        val metadata = PlaybackMetadata(
+            title = currentTitle,
+            subtitle = currentSourceName,
+            duration = videoView.duration,
+            currentPosition = videoView.currentPosition
+        )
+        binder.takePlayer(player, metadata)
+    }
+
+    /** 当前视频标题（用于后台通知栏）。 */
+    private val currentTitle: String
+        get() {
+            return if (itemViewModel.getItemSize() > mCurPos) {
+                itemViewModel.getItem(mCurPos).name.ifBlank { "正在播放" }
+            } else {
+                "正在播放"
+            }
+        }
+
+    /** 当前视频来源副标题（用于后台通知栏）。 */
+    private val currentSourceName: String
+        get() {
+            return itemViewModel.getMediaData()?.title ?: ""
+        }
+
     override fun onDestroy() {
         super.onDestroy()
         // 注销 PiP 广播接收器，避免内存泄漏
@@ -917,6 +1025,13 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         clearBackgroundRecoveryState()
         clearSurfaceTrace()
         PlayerInitializer.resetSpeed()
+        // 如果 Service 还持有 player（Activity 异常销毁），取回并释放
+        if (isBoundToPlaybackService) {
+            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+            isBoundToPlaybackService = false
+        }
+        playbackService?.returnPlayer()?.release()
+        playbackService = null
         videoView.release()
         danmakuView.release()
     }
@@ -1116,6 +1231,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             enterPipUiState()
         } else {
             exitPipUiState()
+            // PiP 退出后不主动 pause —— 让 onStop 决定是进后台还是正常暂停
         }
     }
 
