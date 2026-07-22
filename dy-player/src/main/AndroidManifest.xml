@@ -72,7 +72,6 @@
             android:launchMode="singleTop"
             android:label="@string/title_short_video"
             android:autoRemoveFromRecents="true"
-            android:supportsPictureInPicture="true"
             android:exported="true"
             android:theme="@style/Theme.App.ShortVideo">
             <intent-filter> <!-- Local files with MIME type (e.g. Google Drive) -->

@@ -1377,8 +1377,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             !packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
             return false
         }
-        // currentPlayState 为 STATE_PLAYING 时才进入 PiP
-        return videoView.currentPlayState == VideoView.STATE_PLAYING
+        // 视频处于播放中才进入 PiP。
+        // 用 isPlaying() 而非 currentPlayState == STATE_PLAYING，
+        // 因为视频可能处于 STATE_BUFFERED(7) 等活跃态（isPlaying 对其返回 true）。
+        return videoView.isPlaying && videoView.hasPlayer()
     }
 
     /**
