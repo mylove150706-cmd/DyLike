@@ -51,8 +51,13 @@ class PlaybackService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 从 Intent extra 读取来源 Activity(在 startForeground 前就设置好 contentIntent)
+        intent?.getStringExtra("source_activity")?.let { className ->
+            try {
+                sourceActivityClass = Class.forName(className)
+            } catch (_: ClassNotFoundException) {}
+        }
         // 立即 startForeground(空通知),避免 5 秒超时
-        // 实际内容在 takePlayer 后更新
         val placeholderNotification = notificationHelper?.buildNotification(
             PlaybackMetadata(title = "正在后台播放"),
             isPlaying = false,
@@ -182,11 +187,22 @@ class PlaybackService : Service() {
         manager.notify(PlaybackNotificationHelper.NOTIFICATION_ID, notification)
     }
 
+    /** Activity 在 takePlayer 时设置,用于通知点击恢复到正确的 Activity。 */
+    private var sourceActivityClass: Class<*>? = null
+
+    fun setSourceActivity(cls: Class<*>) {
+        sourceActivityClass = cls
+        // 立即更新通知(让 contentIntent 指向正确的 Activity)
+        if (metadata != null && player != null) {
+            updateNotification()
+        }
+    }
+
     private fun createContentIntent(): android.app.PendingIntent {
-        // 点击通知打开 MainActivity(让它跳转到对应播放页)
-        val intent = Intent(this, me.lingci.dy.player.ui.main.MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        // minSdk = 24 (M = 23),FLAG_IMMUTABLE 自 API 23 起可用,可直接使用
+        // 点击通知打开来源 Activity(长视频/短视频),而非 MainActivity
+        val cls = sourceActivityClass ?: me.lingci.dy.player.ui.main.MainActivity::class.java
+        val intent = Intent(this, cls)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
         return android.app.PendingIntent.getActivity(this, 0, intent, flags)
     }

@@ -1047,7 +1047,7 @@ class ShortVideoActivity : BaseActivity() {
         // 否则 onStop 里 shouldEnterBackgroundPlay() 会因状态已被改为 STATE_PAUSED 而被跳过，
         // 后台播放功能在非 PiP 路径下会静默失效。
         if (!isChangingConfigurations && !userInitiatedExit && ::mVideoView.isInitialized
-            && mVideoView.currentPlayState == VideoView.STATE_PLAYING && mVideoView.hasPlayer()) {
+            && mVideoView.isPlaying && mVideoView.hasPlayer()) {
             logAndCache(TAG, "D", "onPause skip pause: pending background play")
             return
         }
@@ -1102,7 +1102,7 @@ class ShortVideoActivity : BaseActivity() {
     /** 后台播放触发条件：播放中 + 有 player。 */
     private fun shouldEnterBackgroundPlay(): Boolean {
         if (!::mVideoView.isInitialized) return false
-        return mVideoView.currentPlayState == VideoView.STATE_PLAYING && mVideoView.hasPlayer()
+        return mVideoView.isPlaying && mVideoView.hasPlayer()
     }
 
     /** 启动并绑定 PlaybackService。 */
@@ -1155,6 +1155,7 @@ class ShortVideoActivity : BaseActivity() {
             currentPosition = mVideoView.currentPosition
         )
         // Task 8: 先用 null 封面 takePlayer(立即显示标题),再异步加载封面后 updateMetadata。
+        binder.setSourceActivity(ShortVideoActivity::class.java)
         binder.takePlayer(player, metadata.copy(coverBitmap = null))
         loadCoverBitmap(currentCoverUrl) { bitmap ->
             if (bitmap != null) {

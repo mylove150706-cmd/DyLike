@@ -3,6 +3,7 @@ package me.lingci.lib.player.exo.render
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.opengl.GLES20
+import android.opengl.GLES30
 import android.opengl.GLSurfaceView
 import androidx.media3.common.util.GlProgram
 import androidx.media3.common.util.GlUtil
@@ -71,6 +72,8 @@ class SharpenVideoRenderer(
     private var smallFboTexId = 0
     private val SMALL_W = 320
     private val SMALL_H = 180
+    // 用于 CPU 读取像素的 reusable buffer(同步路径 fallback)
+    private var smallPixelBuffer: java.nio.ByteBuffer? = null
 
     // PBO 双缓冲（异步 glReadPixels）
     private val pboIds = IntArray(2)
@@ -81,6 +84,7 @@ class SharpenVideoRenderer(
 
     // 异步推理
     private val ncnnExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile private var released = false
     @Volatile private var ncnnInferInProgress = false
     @Volatile private var ncnnResultReady = false
     @Volatile private var ncnnResultBytes: ByteArray? = null
@@ -256,20 +260,24 @@ class SharpenVideoRenderer(
             // PBO 读取是异步的：上一帧 glReadPixels 已经发起 DMA，现在数据应该在内存了
             if (pboReadPending) {
                 val prevPbo = pboIds[(pboIndex + 1) % 2]
-                GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, prevPbo)
+                GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, prevPbo)
                 // glMapBufferRange 几乎不等待（DMA 已完成）
-                val mapped = GLES20.glMapBufferRange(GLES20.GL_PIXEL_PACK_BUFFER, 0, pboSize,
-                    GLES20.GL_MAP_READ_BIT)
+                val mapped = GLES30.glMapBufferRange(GLES30.GL_PIXEL_PACK_BUFFER, 0, pboSize,
+                    GLES30.GL_MAP_READ_BIT)
                 if (mapped != null) {
-                    mapped.position(0)
-                    mapped.limit(pboSize)
+                    (mapped as java.nio.ByteBuffer).rewind()
                     val inputBytes = ByteArray(pboSize)
-                    mapped.get(inputBytes)
-                    GLES20.glUnmapBuffer(GLES20.GL_PIXEL_PACK_BUFFER)
-                    GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+                    (mapped as java.nio.ByteBuffer).get(inputBytes)
+                    GLES30.glUnmapBuffer(GLES30.GL_PIXEL_PACK_BUFFER)
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
 
                     // 提交到后台线程推理
                     ncnnExecutor.execute {
+                        // release() 已触发：不要再触碰 native 资源（避免 use-after-free）
+                        if (released) {
+                            ncnnInferInProgress = false
+                            return@execute
+                        }
                         try {
                             val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
                             if (ncnnOut != null) {
@@ -287,7 +295,7 @@ class SharpenVideoRenderer(
                     pboReadPending = false
                     // 不要在这里 return，继续做 GPU blit + 发起新的 PBO 写入
                 } else {
-                    GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+                    GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
                     pboReadPending = false
                     ncnnInferInProgress = false
                     return
@@ -308,10 +316,10 @@ class SharpenVideoRenderer(
 
             // === 第三步：异步 PBO 写入（glReadPixels 到 PBO，立即返回）===
             val curPbo = pboIds[pboIndex]
-            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, curPbo)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, curPbo)
             // 这个调用立即返回！DMA 异步传输，不阻塞 GL 线程
-            GLES20.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, 0)
-            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+            GLES30.glReadPixels(0, 0, SMALL_W, SMALL_H, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, 0)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
             GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
 
             pboIndex = (pboIndex + 1) % 2
@@ -325,12 +333,12 @@ class SharpenVideoRenderer(
     /** 初始化 PBO 双缓冲 */
     private fun ensurePbo() {
         if (pboInitialized) return
-        GLES20.glGenBuffers(2, pboIds, 0)
+        GLES30.glGenBuffers(2, pboIds, 0)
         for (i in 0..1) {
-            GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, pboIds[i])
-            GLES20.glBufferData(GLES20.GL_PIXEL_PACK_BUFFER, pboSize, null, GLES20.GL_DYNAMIC_READ)
+            GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, pboIds[i])
+            GLES30.glBufferData(GLES30.GL_PIXEL_PACK_BUFFER, pboSize, null, GLES30.GL_DYNAMIC_READ)
         }
-        GLES20.glBindBuffer(GLES20.GL_PIXEL_PACK_BUFFER, 0)
+        GLES30.glBindBuffer(GLES30.GL_PIXEL_PACK_BUFFER, 0)
         pboInitialized = true
         Log.d("SharpenVideoRenderer", "PBO initialized: 2x ${SMALL_W}x${SMALL_H} = ${pboSize} bytes each")
     }
@@ -436,6 +444,11 @@ class SharpenVideoRenderer(
                 smallPixelBuffer!!.get(inputBytes)
 
                 ncnnExecutor.execute {
+                    // release() 已触发：不要再触碰 native 资源（避免 use-after-free）
+                    if (released) {
+                        ncnnInferInProgress = false
+                        return@execute
+                    }
                     try {
                         val ncnnOut = sr.infer(inputBytes, SMALL_W, SMALL_H)
                         if (ncnnOut != null) {
@@ -591,7 +604,26 @@ class SharpenVideoRenderer(
 
     fun release() {
         try {
-            ncnnExecutor.shutdownNow()
+            // 1. 先置位 released：阻止新的投递 + 让后台任务早退
+            released = true
+
+            // 2. 优雅关闭 executor，等待正在执行的 infer() 结束。
+            //    不能用 shutdownNow()：它会立刻中断线程，但 NCNN/OpenMP 内部的
+            //    pthread_mutex 并不响应 Java 中断，native 仍在跑，主线程随后调用
+            //    nativeRelease() → sr_net.clear() 会触发 use-after-free / destroyed-mutex 崩溃。
+            ncnnExecutor.shutdown()
+            try {
+                if (!ncnnExecutor.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    // 兜底：3 秒还跑不完（理论上单帧 ~50-100ms），强制停
+                    ncnnExecutor.shutdownNow()
+                    ncnnExecutor.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)
+                }
+            } catch (_: InterruptedException) {
+                ncnnExecutor.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+
+            // 3. 此时所有 native 推理已结束，安全释放
             surfaceTexture?.release()
             blitProgram?.delete()
             sgsrProgram?.delete()

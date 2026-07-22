@@ -946,22 +946,68 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onStart() {
         super.onStart()
-        // M2 fix: 用户已返回前台，清除“待进入后台”标记。
-        // 即使 onServiceConnected 这时才触发，tryEnterBackgroundPlay 也会因此跳过 detach。
+        android.util.Log.i("BgPlayDebug", "onStart: isBound=" + isBoundToPlaybackService + " binder=" + (playbackService != null) + " holding=" + (playbackService?.isHoldingPlayer ?: false))
+        // M2 fix: 用户已返回前台，清除"待进入后台"标记。
         pendingBackgroundEntry = false
-        // 如果 Service 持有 player，取回
-        if (isBoundToPlaybackService && playbackService?.isHoldingPlayer == true) {
-            val player = playbackService?.returnPlayer()
-            if (player != null) {
-                videoView.attachPlayer(player)
-                videoView.setEnableAudioFocus(true)
-                Log.d(this, "resumed from background, player reattached")
+        // 如果 binder 已连接且 Service 持有 player，直接取回
+        if (playbackService?.isHoldingPlayer == true) {
+            reclaimPlayerFromService()
+            return
+        }
+        // 通知点击恢复场景:Activity 重建后 playbackService 为 null,
+        // 但 Service 可能还在运行(持有 player)。延迟 500ms 再检查,
+        // 避免与 onStop→onStart 极速切换冲突。
+        if (!isBoundToPlaybackService) {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (!isFinishing && !isDestroyed && playbackService?.isHoldingPlayer != true) {
+                    tryReclaimFromSurvivingService()
+                }
+            }, 500)
+        }
+    }
+
+    private fun reclaimPlayerFromService() {
+        val player = playbackService?.returnPlayer()
+        if (player != null) {
+            videoView.attachPlayer(player)
+            videoView.setEnableAudioFocus(true)
+            Log.d(this, "resumed from background, player reattached")
+        }
+        try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
+        isBoundToPlaybackService = false
+        playbackService = null
+        unregisterPlaybackActionReceiver()
+    }
+
+    /**
+     * 通知点击恢复场景：Service 可能还在运行(持有 player)，但 Activity 的 binder 已断开。
+     * 重新 bind 取回 player。
+     */
+    private fun tryReclaimFromSurvivingService() {
+        val intent = Intent(this, PlaybackService::class.java)
+        val reclaimConnection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                val binder = service as? PlaybackBinder
+                if (binder?.isHoldingPlayer == true) {
+                    val player = binder.returnPlayer()
+                    if (player != null) {
+                        videoView.attachPlayer(player)
+                        videoView.setEnableAudioFocus(true)
+                        android.util.Log.i("BgPlayDebug", "reclaimed player from surviving service")
+                    }
+                    binder.stopForegroundAndNotification()
+                } else {
+                    // Service 没持有 player,停止它
+                    binder?.stopForegroundAndNotification()
+                }
+                try { unbindService(this) } catch (_: Exception) {}
             }
-            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
-            isBoundToPlaybackService = false
-            playbackService = null
-            // 取回 player 后注销通知栏控制广播接收器
-            unregisterPlaybackActionReceiver()
+            override fun onServiceDisconnected(name: ComponentName?) {}
+        }
+        try {
+            bindService(intent, reclaimConnection, 0)
+        } catch (e: Exception) {
+            android.util.Log.w("BgPlayDebug", "tryReclaimFromSurvivingService failed: ${e.message}")
         }
     }
 
@@ -994,8 +1040,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onPause() {
         super.onPause()
+        android.util.Log.i("BgPlayDebug", "onPause: pip=$isInPictureInPictureMode state=${videoView.currentPlayState} hasPlayer=${videoView.hasPlayer()} changingCfg=$isChangingConfigurations userExit=$userInitiatedExit")
         // PiP 模式下不暂停视频和弹幕，保持小窗继续播放
         if (isInPictureInPictureMode) {
+            android.util.Log.i("BgPlayDebug", "onPause: in PiP, early return")
             return
         }
         rememberPlaybackPosition(videoView.currentPosition)
@@ -1010,8 +1058,10 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         // 否则 onStop 里 shouldEnterBackgroundPlay() 会因状态已被改为 STATE_PAUSED 而被跳过，
         // 后台播放功能在非 PiP 路径下会静默失效。
         // 弹幕也要保持播放（音频继续），由 onStart 取回 player 时再统一恢复。
+        // 注意：视频可能处于 STATE_BUFFERED(7) 等活跃态而非 STATE_PLAYING(3)，
+        // 所以用 isPlaying() 而不是 currentPlayState == STATE_PLAYING。
         if (!isChangingConfigurations && !userInitiatedExit
-            && videoView.currentPlayState == VideoView.STATE_PLAYING && videoView.hasPlayer()) {
+            && videoView.isPlaying && videoView.hasPlayer()) {
             Log.d(this, "onPause skip pause: pending background play")
             return
         }
@@ -1021,9 +1071,11 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     override fun onStop() {
         super.onStop()
+        android.util.Log.i("BgPlayDebug", "onStop: userExit=$userInitiatedExit changingCfg=$isChangingConfigurations pip=$isInPictureInPictureMode state=${videoView.currentPlayState} hasPlayer=${videoView.hasPlayer()}")
         // 用户主动退出 → 不进后台
         if (userInitiatedExit) {
             userInitiatedExit = false
+            android.util.Log.i("BgPlayDebug", "onStop: user exit, skip background")
             return
         }
         // 旋屏等配置变化 → 不进后台
@@ -1038,13 +1090,15 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
 
     /** 后台播放触发条件：播放中 + 未暂停 + 有 player。 */
     private fun shouldEnterBackgroundPlay(): Boolean {
-        return videoView.currentPlayState == VideoView.STATE_PLAYING
-            && videoView.hasPlayer()
+        // 用 isPlaying() 而不是 currentPlayState == STATE_PLAYING，
+        // 因为视频可能处于 STATE_BUFFERED(7) 等活跃态。
+        return videoView.isPlaying && videoView.hasPlayer()
     }
 
     /** 启动并绑定 PlaybackService。 */
     private fun startPlaybackService() {
         val intent = Intent(this, PlaybackService::class.java)
+        intent.putExtra("source_activity", LongVideoActivity::class.java.name)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
@@ -1087,6 +1141,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             currentPosition = videoView.currentPosition
         )
         // Task 8: 先用 null 封面 takePlayer(立即显示标题),再异步加载封面后 updateMetadata。
+        binder.setSourceActivity(LongVideoActivity::class.java)
         binder.takePlayer(player, metadata.copy(coverBitmap = null))
         loadCoverBitmap(currentCoverUrl) { bitmap ->
             if (bitmap != null) {

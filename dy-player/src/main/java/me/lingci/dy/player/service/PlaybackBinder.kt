@@ -16,6 +16,11 @@ class PlaybackBinder(private val service: PlaybackService) : android.os.Binder()
         service.takePlayer(player, metadata)
     }
 
+    /** 设置通知点击应该恢复到哪个 Activity。 */
+    fun setSourceActivity(cls: Class<*>) {
+        service.setSourceActivity(cls)
+    }
+
     /** Activity 从 Service 取回 player。返回 null 表示 Service 没持有。 */
     fun returnPlayer(): AbstractPlayer? = service.returnPlayer()
 
