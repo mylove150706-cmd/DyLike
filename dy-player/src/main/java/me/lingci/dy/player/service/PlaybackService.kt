@@ -203,8 +203,14 @@ class PlaybackService : Service() {
         val cls = sourceActivityClass ?: me.lingci.dy.player.ui.main.MainActivity::class.java
         val intent = Intent(this, cls)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-        return android.app.PendingIntent.getActivity(this, 0, intent, flags)
+        // 关键: requestCode 必须随目标 Activity 变化,否则首次用 MainActivity 占位通知生成的
+        // PendingIntent(requestCode=0) 会被系统缓存,后续 setSourceActivity 改成 LongVideoActivity
+        // 后,FLAG_UPDATE_CURRENT 只更新 extras 而不替换已缓存的 component,导致点击通知仍打开
+        // MainActivity(媒体库)而非播放页。改用 cls.hashCode() 作为 requestCode 即可隔离。
+        val requestCode = cls.name.hashCode()
+        val flags = android.app.PendingIntent.FLAG_IMMUTABLE
+        Log.i(TAG, "createContentIntent: target=${cls.name} requestCode=$requestCode")
+        return android.app.PendingIntent.getActivity(this, requestCode, intent, flags)
     }
 
     // === AudioFocus ===
