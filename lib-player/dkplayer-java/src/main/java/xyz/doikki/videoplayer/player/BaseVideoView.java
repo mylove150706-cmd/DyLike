@@ -487,15 +487,10 @@ public class BaseVideoView<P extends AbstractPlayer> extends FrameLayout
      */
     protected void saveProgress() {
         if (mProgressManager != null && mCurrentPosition > 0) {
-            // 接近末尾时(剩余 < 10秒)保存 0,避免下次打开秒播完又结束。
             long duration = getDuration();
-            if (duration > 0 && duration - mCurrentPosition < 10000) {
-                L.d("saveProgress: near end, clear progress (pos=" + mCurrentPosition + ", dur=" + duration + ")");
-                mProgressManager.saveProgress(mUrl, 0);
-            } else {
-                L.d("saveProgress: " + mCurrentPosition);
-                mProgressManager.saveProgress(mUrl, mCurrentPosition);
-            }
+            long saved = xyz.doikki.videoplayer.util.ProgressUtils.computeSavedProgress(mCurrentPosition, duration);
+            L.d("saveProgress: pos=" + mCurrentPosition + " dur=" + duration + " saved=" + saved);
+            mProgressManager.saveProgress(mUrl, saved);
         }
     }
 
@@ -622,10 +617,9 @@ public class BaseVideoView<P extends AbstractPlayer> extends FrameLayout
             mAudioFocusHelper.requestFocus();
         }
         if (mCurrentPosition > 0) {
-            // 进度接近末尾时(剩余 < 10秒)从头播放,避免 seek 到末尾秒播完。
             long duration = getDuration();
-            if (duration > 0 && duration - mCurrentPosition < 10000) {
-                L.d("onPrepared: saved position near end, restart from beginning (pos=" + mCurrentPosition + ", dur=" + duration + ")");
+            if (xyz.doikki.videoplayer.util.ProgressUtils.isNearEnd(mCurrentPosition, duration)) {
+                L.d("onPrepared: near end, restart from beginning (pos=" + mCurrentPosition + ", dur=" + duration + ")");
                 mCurrentPosition = 0;
                 if (mProgressManager != null) {
                     mProgressManager.saveProgress(mUrl, 0);

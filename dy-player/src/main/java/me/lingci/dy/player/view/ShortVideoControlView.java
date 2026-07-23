@@ -59,8 +59,19 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
     private boolean mIsLongPressing = false;
     private float mCurrentSpeed = 1.0f;
 
-    /** 沉浸模式：隐藏所有信息覆盖层，只显示纯视频画面。 */
+    /**
+     * 自动沉浸体验：开启后播放 3 秒自动隐藏 UI + 系统栏，
+     * 点击屏幕退出沉浸，3 秒无操作再次进入沉浸。
+     */
+    private boolean autoImmersiveEnabled = false;
     private boolean immersiveMode = false;
+    private final android.os.Handler mImmersiveHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private static final long IMMERSIVE_DELAY_MS = 3000;
+    private final Runnable mEnterImmersiveRunnable = () -> {
+        if (autoImmersiveEnabled && !immersiveMode) {
+            enterImmersive();
+        }
+    };
     private boolean mIsSpeedLocked = false;
     private int mSeekPosition = -1;
     private boolean mFirstTouch;
@@ -92,7 +103,7 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
 
         void playNext();
 
-        void onImmersiveModeChanged(boolean immersive);
+        void onChangeSysBar(boolean show);
 
     }
 
@@ -147,7 +158,6 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
                 mOnShortVideoListener.onMoreAction();
             }
         });
-        mBinding.btnImmersive.setOnClickListener(v -> setImmersiveMode(true));
         changeVisibility();
         mBinding.speedNode.setVisibility(GONE);
         mBinding.speedNode.setNodes(SPEED_NODES, 2);
@@ -198,13 +208,16 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
     @Override
     public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
         if (immersiveMode) {
-            // 沉浸下单击 = 退出沉浸，不触发播放/暂停
-            setImmersiveMode(false);
+            // 沉浸中点击:退出沉浸,重新计时 3 秒后再进
+            exitImmersive();
+            scheduleImmersive();
             return true;
         }
         if (mControlWrapper != null && !mControlWrapper.isFullScreen()) {
             mControlWrapper.togglePlay();
         }
+        // 非沉浸点击:重新计时
+        scheduleImmersive();
         return true;
     }
 
@@ -504,47 +517,67 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
         mBinding.playLike.setSelected(like);
     }
 
-    /**
-     * 沉浸模式：隐藏/恢复所有信息覆盖层（标题、收藏、评论、页码、进度条、更多、沉浸按钮）。
-     * 沉浸下单击画面退出沉浸（不触发播放/暂停），双击/长按不响应。
-     */
-    public void setImmersiveMode(boolean immersive) {
-        this.immersiveMode = immersive;
+    // === 自动沉浸体验 ===
+
+    /** 从 SharedPreferences 读取"沉浸体验"开关(showSysBar 的反值)。 */
+    private boolean isImmersiveSettingEnabled() {
+        try {
+            boolean spVal = android.preference.PreferenceManager
+                    .getDefaultSharedPreferences(getContext())
+                    .getBoolean("showSysBar", true);
+            return !spVal;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 开启/关闭自动沉浸(由 Activity 根据"沉浸体验"开关调用)。 */
+    public void setAutoImmersiveEnabled(boolean enabled) {
+        this.autoImmersiveEnabled = enabled;
+        if (enabled) {
+            scheduleImmersive();
+        } else {
+            cancelImmersive();
+            exitImmersive();
+        }
+    }
+
+    /** 进入沉浸:隐藏 UI 覆盖层 + 系统栏。 */
+    private void enterImmersive() {
+        immersiveMode = true;
+        mBinding.tvTitle.setVisibility(GONE);
+        mBinding.playLike.setVisibility(GONE);
+        mBinding.layoutComment.setVisibility(GONE);
+        mBinding.tvPage.setVisibility(GONE);
+        mBinding.playSeekbar.setVisibility(GONE);
+        mBinding.ivMore.setVisibility(GONE);
+        mBinding.playBtn.setVisibility(GONE);
+        mBinding.ivFull.setVisibility(GONE);
         if (mOnShortVideoListener != null) {
-            mOnShortVideoListener.onImmersiveModeChanged(immersive);
-        }
-        int visibility = immersive ? GONE : VISIBLE;
-        boolean showTitle = PlayerInitializer.Player.INSTANCE.getShortShowTitle();
-        boolean showLike = PlayerInitializer.Player.INSTANCE.getShortShowLike();
-        boolean showComment = PlayerInitializer.Player.INSTANCE.getShortShowComment();
-        boolean showPager = PlayerInitializer.Player.INSTANCE.getShortShowPager();
-        boolean showSeekbar = PlayerInitializer.Player.INSTANCE.getShortShowSeekbar();
-        boolean showMore = PlayerInitializer.Player.INSTANCE.getShortShowMore();
-        mBinding.tvTitle.setVisibility(showTitle ? visibility : GONE);
-        mBinding.playLike.setVisibility(showLike ? visibility : GONE);
-        mBinding.layoutComment.setVisibility(showComment ? visibility : GONE);
-        mBinding.tvPage.setVisibility(showPager ? visibility : GONE);
-        mBinding.playSeekbar.setVisibility(showSeekbar ? visibility : GONE);
-        mBinding.ivMore.setVisibility(showMore ? visibility : GONE);
-        mBinding.btnImmersive.setVisibility(immersive ? GONE : VISIBLE);
-        if (immersive) {
-            mBinding.playBtn.setVisibility(GONE);
-            mBinding.ivFull.setVisibility(GONE);
+            mOnShortVideoListener.onChangeSysBar(false);
         }
     }
 
-    public boolean isImmersiveMode() {
-        return immersiveMode;
+    /** 退出沉浸:恢复 UI 覆盖层 + 系统栏。 */
+    private void exitImmersive() {
+        immersiveMode = false;
+        changeVisibility();
+        if (mOnShortVideoListener != null) {
+            mOnShortVideoListener.onChangeSysBar(true);
+        }
     }
 
-    /** 立即确保沉浸按钮可见性正确(不触发回调,不等 STATE_PLAYING)。 */
-    /**
-     * 由 Activity 调用，用全局沉浸状态刷新按钮可见性。
-     * 解决 ControlView 实例间 immersiveMode 不同步的问题。
-     */
-    public void refreshImmersiveButton(boolean globalImmersive) {
-        this.immersiveMode = globalImmersive;
-        mBinding.btnImmersive.setVisibility(globalImmersive ? GONE : VISIBLE);
+    /** 启动 3 秒后进入沉浸的定时器。 */
+    private void scheduleImmersive() {
+        mImmersiveHandler.removeCallbacks(mEnterImmersiveRunnable);
+        if (autoImmersiveEnabled) {
+            mImmersiveHandler.postDelayed(mEnterImmersiveRunnable, IMMERSIVE_DELAY_MS);
+        }
+    }
+
+    /** 取消沉浸定时器。 */
+    private void cancelImmersive() {
+        mImmersiveHandler.removeCallbacks(mEnterImmersiveRunnable);
     }
 
     public void changeVisibility() {
@@ -599,7 +632,8 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
                         mBinding.ivFull.setVisibility(GONE);
                     }
                 }
-                mBinding.btnImmersive.setVisibility(immersiveMode ? GONE : VISIBLE);
+                // 切换视频后重新启动沉浸定时器(只在开关开时生效)
+                scheduleImmersive();
                 mControlWrapper.startProgress();
                 break;
             case VideoView.STATE_PAUSED:

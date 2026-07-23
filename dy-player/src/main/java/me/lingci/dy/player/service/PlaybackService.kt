@@ -226,7 +226,15 @@ class PlaybackService : Service() {
      * 用户从最近任务列表划掉 app 时调用。
      * 全局约束:划掉 app = 停止播放(不跨进程)。
      */
+    /**
+     * 用户从最近任务列表划掉 app 时调用。
+     * 释放 player 停止播放。
+     */
     override fun onTaskRemoved(rootIntent: Intent?) {
+        player?.release()
+        player = null
+        abandonAudioFocus()
+        stopForegroundAndNotification()
         stopSelf()
         super.onTaskRemoved(rootIntent)
     }

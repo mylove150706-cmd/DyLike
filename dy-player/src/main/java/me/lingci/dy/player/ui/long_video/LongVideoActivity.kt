@@ -1080,8 +1080,13 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         }
     }
 
-    /** 后台播放触发条件：处于活跃播放态(PLAYING/BUFFERED) + 有 player。 */
+    /** 后台播放触发条件：开关开启 + 处于活跃播放态(PLAYING/BUFFERED) + 有 player。 */
     private fun shouldEnterBackgroundPlay(): Boolean {
+        // 后台播放开关关闭 → 不走后台播放
+        if (!spUtil.longVideoBackgroundPlay) {
+            android.util.Log.i("BgPlayDebug", "shouldEnterBackgroundPlay: switch OFF, skip")
+            return false
+        }
         // 用 currentPlayState 判断而非 isPlaying()：player 从后台 Service 取回后，
         // 内部状态可能与 currentPlayState 不同步(isPlaying 返回 false 但 state 仍是 PLAYING)，
         // 导致后台播放触发不了。currentPlayState 反映的是用户预期状态。
@@ -1453,7 +1458,18 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
             enterPipUiState()
         } else {
             exitPipUiState()
-            // PiP 退出后不主动 pause —— 让 onStop 决定是进后台还是正常暂停
+            // PiP 退出后:
+            // - 后台播放开关开: 直接进入后台播放(PiP 退出后 Activity 回到前台,不会触发 onStop)
+            // - 后台播放开关关: 主动 pause(用户关闭 PiP 意味着不想继续播放)
+            if (spUtil.longVideoBackgroundPlay && shouldEnterBackgroundPlay()) {
+                android.util.Log.i("BgPlayDebug", "PiP exit: bg switch on, start background play")
+                startPlaybackService()
+            } else if (!spUtil.longVideoBackgroundPlay) {
+                if (::videoView.isInitialized && videoView.hasPlayer()) {
+                    videoView.pause()
+                    android.util.Log.i("BgPlayDebug", "PiP exit: bg switch off, pause")
+                }
+            }
         }
     }
 

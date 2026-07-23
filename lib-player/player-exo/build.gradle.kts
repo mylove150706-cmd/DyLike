@@ -65,5 +65,6 @@ dependencies {
         exclude(group = "org.jetbrains.kotlin")
         exclude(group = "androidx.lifecycle")
     }
-
+    testImplementation(libs.test.junit)
+    testImplementation(libs.test.mockk)
 }

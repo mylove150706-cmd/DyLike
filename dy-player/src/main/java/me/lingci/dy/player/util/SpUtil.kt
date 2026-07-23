@@ -215,6 +215,9 @@ open class SpUtil(context: Context) : SpBase(context) {
     // 长视频画中画：开启后按 Home 键自动进入 PiP 小窗（需系统支持）
     var longVideoPip by SPManager.boolean(true)
 
+    // 长视频后台播放：开启后 PiP 关闭/无 PiP 时按 Home 进入后台音频播放
+    var longVideoBackgroundPlay by SPManager.boolean(false)
+
     private companion object {
         private const val KEY_VIDEO_PLAYER_CORE = "videoPlayerCore"
         // Kept only for migration and old backup restore. New runtime reads videoPlayerCore.

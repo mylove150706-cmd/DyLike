@@ -56,6 +56,14 @@ class PlaybackNotificationHelper(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setShowWhen(false)
 
+        // 通知被用户划掉时触发 deleteIntent → 发 CLOSE 广播 → Service 释放 player 停止
+        val deleteIntent = Intent(PlaybackAction.ACTION_CLOSE).setPackage(context.packageName)
+        val deleteFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        else
+            PendingIntent.FLAG_UPDATE_CURRENT
+        builder.setDeleteIntent(PendingIntent.getBroadcast(context, PlaybackAction.ACTION_CLOSE.hashCode(), deleteIntent, deleteFlags))
+
         if (metadata.coverBitmap != null) {
             builder.setLargeIcon(metadata.coverBitmap)
         }
