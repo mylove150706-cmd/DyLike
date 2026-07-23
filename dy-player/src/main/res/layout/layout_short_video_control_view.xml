@@ -45,8 +45,22 @@
 
     <androidx.constraintlayout.widget.ConstraintLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom">
+        android:layout_height="match_parent">
+
+        <ImageView
+            android:id="@+id/btn_immersive"
+            android:layout_width="@dimen/dp48"
+            android:layout_height="@dimen/dp48"
+            app:layout_constraintBottom_toTopOf="@+id/play_like"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:background="@null"
+            android:padding="@dimen/dkplayer_default_spacing"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_immersive"
+            app:tint="@color/white"
+            android:visibility="visible"
+            tools:visibility="visible"
+            tools:ignore="ContentDescription" />
 
         <ImageView
             android:id="@+id/play_like"

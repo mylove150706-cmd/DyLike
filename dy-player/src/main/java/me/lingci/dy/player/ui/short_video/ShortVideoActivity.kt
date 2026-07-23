@@ -146,6 +146,8 @@ class ShortVideoActivity : BaseActivity() {
     private val shortCommentDialog by lazy { ShortCommentDialog() }
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
+    /** 沉浸模式全局状态(切视频后保持)。 */
+    private var isImmersiveMode = false
 
     // 超分开关广播接收器：仅写 SP，重播生效由短视频列表自然触发（滑到下一个再滑回来）。
     // 短视频列表架构复杂，运行时强切 render view 风险大；简化为"下次播放时生效"。
@@ -525,6 +527,8 @@ class ShortVideoActivity : BaseActivity() {
                 if (state == ViewPager2.SCROLL_STATE_IDLE) {
                     isUserScroll.set(false)
                     resetAllControlViewAlpha(animated = true)
+                    // 翻页完成后确保沉浸按钮可见(非沉浸时),不依赖 STATE_PLAYING
+                    activeShortVideoControlView?.refreshImmersiveButton(isImmersiveMode)
                 } else {
                     isUserScroll.set(true)
                 }
@@ -586,6 +590,10 @@ class ShortVideoActivity : BaseActivity() {
                     mBinding.viewpage2.setCurrentItem(currentIndex, false)
                     mBinding.viewpage2.postDelayed({ startPlay(currentIndex) }, 30)
                 }
+            }
+
+            override fun onImmersiveModeChanged(immersive: Boolean) {
+                isImmersiveMode = immersive
             }
 
         })
@@ -693,6 +701,11 @@ class ShortVideoActivity : BaseActivity() {
                     updateSubtitleDocking()
                 }
                 activeShortVideoControlView = viewHolder.shortVideoControlView
+                // 沉浸模式:切视频后给新 ControlView 同步全局沉浸状态
+                viewHolder.shortVideoControlView.refreshImmersiveButton(isImmersiveMode)
+                if (isImmersiveMode) {
+                    viewHolder.shortVideoControlView.setImmersiveMode(true)
+                }
                 viewHolder.playerContainer.addView(mVideoView, 0)
                 viewHolder.shortVideoControlView.resetScale(1.0f)
                 mCurPos = position

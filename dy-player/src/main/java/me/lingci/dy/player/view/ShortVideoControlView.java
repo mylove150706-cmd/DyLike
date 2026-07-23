@@ -58,6 +58,9 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
     private final GestureDetector mGestureDetector;
     private boolean mIsLongPressing = false;
     private float mCurrentSpeed = 1.0f;
+
+    /** 沉浸模式：隐藏所有信息覆盖层，只显示纯视频画面。 */
+    private boolean immersiveMode = false;
     private boolean mIsSpeedLocked = false;
     private int mSeekPosition = -1;
     private boolean mFirstTouch;
@@ -88,6 +91,8 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
         void onMoreAction();
 
         void playNext();
+
+        void onImmersiveModeChanged(boolean immersive);
 
     }
 
@@ -142,6 +147,7 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
                 mOnShortVideoListener.onMoreAction();
             }
         });
+        mBinding.btnImmersive.setOnClickListener(v -> setImmersiveMode(true));
         changeVisibility();
         mBinding.speedNode.setVisibility(GONE);
         mBinding.speedNode.setNodes(SPEED_NODES, 2);
@@ -191,6 +197,11 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
     // 解决单击：仅当确定不是双击时触发
     @Override
     public boolean onSingleTapConfirmed(@NonNull MotionEvent e) {
+        if (immersiveMode) {
+            // 沉浸下单击 = 退出沉浸，不触发播放/暂停
+            setImmersiveMode(false);
+            return true;
+        }
         if (mControlWrapper != null && !mControlWrapper.isFullScreen()) {
             mControlWrapper.togglePlay();
         }
@@ -210,7 +221,7 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
 
     @Override
     public void onLongPress(MotionEvent e) {
-        if (mControlWrapper == null || e == null) return;
+        if (immersiveMode || mControlWrapper == null || e == null) return;
 
         mIsLongPressing = true;
         mLongPressY = e.getY();
@@ -243,6 +254,7 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
 
     @Override
     public boolean onDoubleTap(@NonNull MotionEvent e) {
+        if (immersiveMode) return true;
         Log.d(this, "onDoubleTap");
         showLikeAnimation(e.getX(), e.getY());
         if (PlayerInitializer.Player.INSTANCE.getShortShowLike() && !mBinding.playLike.isSelected()) {
@@ -492,6 +504,49 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
         mBinding.playLike.setSelected(like);
     }
 
+    /**
+     * 沉浸模式：隐藏/恢复所有信息覆盖层（标题、收藏、评论、页码、进度条、更多、沉浸按钮）。
+     * 沉浸下单击画面退出沉浸（不触发播放/暂停），双击/长按不响应。
+     */
+    public void setImmersiveMode(boolean immersive) {
+        this.immersiveMode = immersive;
+        if (mOnShortVideoListener != null) {
+            mOnShortVideoListener.onImmersiveModeChanged(immersive);
+        }
+        int visibility = immersive ? GONE : VISIBLE;
+        boolean showTitle = PlayerInitializer.Player.INSTANCE.getShortShowTitle();
+        boolean showLike = PlayerInitializer.Player.INSTANCE.getShortShowLike();
+        boolean showComment = PlayerInitializer.Player.INSTANCE.getShortShowComment();
+        boolean showPager = PlayerInitializer.Player.INSTANCE.getShortShowPager();
+        boolean showSeekbar = PlayerInitializer.Player.INSTANCE.getShortShowSeekbar();
+        boolean showMore = PlayerInitializer.Player.INSTANCE.getShortShowMore();
+        mBinding.tvTitle.setVisibility(showTitle ? visibility : GONE);
+        mBinding.playLike.setVisibility(showLike ? visibility : GONE);
+        mBinding.layoutComment.setVisibility(showComment ? visibility : GONE);
+        mBinding.tvPage.setVisibility(showPager ? visibility : GONE);
+        mBinding.playSeekbar.setVisibility(showSeekbar ? visibility : GONE);
+        mBinding.ivMore.setVisibility(showMore ? visibility : GONE);
+        mBinding.btnImmersive.setVisibility(immersive ? GONE : VISIBLE);
+        if (immersive) {
+            mBinding.playBtn.setVisibility(GONE);
+            mBinding.ivFull.setVisibility(GONE);
+        }
+    }
+
+    public boolean isImmersiveMode() {
+        return immersiveMode;
+    }
+
+    /** 立即确保沉浸按钮可见性正确(不触发回调,不等 STATE_PLAYING)。 */
+    /**
+     * 由 Activity 调用，用全局沉浸状态刷新按钮可见性。
+     * 解决 ControlView 实例间 immersiveMode 不同步的问题。
+     */
+    public void refreshImmersiveButton(boolean globalImmersive) {
+        this.immersiveMode = globalImmersive;
+        mBinding.btnImmersive.setVisibility(globalImmersive ? GONE : VISIBLE);
+    }
+
     public void changeVisibility() {
         mBinding.tvTitle.setVisibility(PlayerInitializer.Player.INSTANCE.getShortShowTitle() ? VISIBLE : GONE);
         mBinding.playLike.setVisibility(PlayerInitializer.Player.INSTANCE.getShortShowLike() ? VISIBLE : GONE);
@@ -535,14 +590,17 @@ public class ShortVideoControlView extends FrameLayout implements IControlCompon
             case VideoView.STATE_PLAYING:
                 L.e("STATE_PLAYING " + hashCode());
                 mBinding.playBtn.setVisibility(GONE);
-                changeVisibility();
-                mControlWrapper.startProgress();
-                int[] videoSize = mControlWrapper.getVideoSize();
-                if (videoSize[1] / 9 * 16 <= videoSize[0]) {
-                    mBinding.ivFull.setVisibility(VISIBLE);
-                } else {
-                    mBinding.ivFull.setVisibility(GONE);
+                if (!immersiveMode) {
+                    changeVisibility();
+                    int[] videoSize = mControlWrapper.getVideoSize();
+                    if (videoSize[1] / 9 * 16 <= videoSize[0]) {
+                        mBinding.ivFull.setVisibility(VISIBLE);
+                    } else {
+                        mBinding.ivFull.setVisibility(GONE);
+                    }
                 }
+                mBinding.btnImmersive.setVisibility(immersiveMode ? GONE : VISIBLE);
+                mControlWrapper.startProgress();
                 break;
             case VideoView.STATE_PAUSED:
                 L.e("STATE_PAUSED " + hashCode());
