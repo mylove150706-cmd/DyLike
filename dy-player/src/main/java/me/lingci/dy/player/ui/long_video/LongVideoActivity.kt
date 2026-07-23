@@ -443,7 +443,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         // Apply the generic render preference first. MPV is allowed to override it below because
         // MPV playback requires its own Surface-backed render view.
         applyConfiguredRenderFactory()
-        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, spUtil.labNeuralSuperResolution)
+        DyPlayerCoreRegistry.applyCore(videoView, spUtil.dyPlayerCore, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, false)
         videoView.setOnPlayerInitializedListener { player ->
             // BaseVideoView may recreate the backend; reattach both Exo-only settings and common
             // capability listeners for every new concrete player instance.
@@ -537,7 +537,7 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
     private fun applyPlaybackCoreFor(videoBean: VideoData, playUrl: String) {
         applyConfiguredRenderFactory()
         val core = if (isSmbVideo(videoBean, playUrl)) DyPlayerCore.EXO else spUtil.dyPlayerCore
-        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, spUtil.labNeuralSuperResolution)
+        DyPlayerCoreRegistry.applyCore(videoView, core, spUtil.labMpvSpecialRender, spUtil.labMpvSuperResolution, false)
     }
 
     private fun applyConfiguredRenderFactory() {
