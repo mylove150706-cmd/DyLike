@@ -9,13 +9,10 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
+import me.lingci.dy.player.R
 
 /**
- * 后台播放通知构建器(MediaStyle + 封面大视图)。
- *
- * 通知布局:
- * - ContentView(收起): MediaStyle + 标题/副标题 + 3 键(上/暂停/下)
- * - BigContentView(展开): 封面大图 + 标题/副标题 + 3 键 + 关闭/打开
+ * 后台播放通知构建器(MediaStyle + 标准按钮)。
  */
 class PlaybackNotificationHelper(private val context: Context) {
 
@@ -25,7 +22,6 @@ class PlaybackNotificationHelper(private val context: Context) {
         const val NOTIFICATION_ID = 1001
     }
 
-    /** 创建通知渠道(Android 8+ 必需)。幂等。 */
     fun ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java)
@@ -42,20 +38,12 @@ class PlaybackNotificationHelper(private val context: Context) {
         }
     }
 
-    /**
-     * 构建后台播放通知。
-     *
-     * @param metadata 视频元数据(标题/封面/时长)
-     * @param isPlaying 当前是否在播放(决定暂停/播放按钮图标)
-     * @param sessionToken MediaSession token(用于 MediaStyle 对接系统)
-     * @param contentIntent 点击通知主体打开 Activity 的 PendingIntent
-     * @return 构建好的 Notification
-     */
     fun buildNotification(
         metadata: PlaybackMetadata,
         isPlaying: Boolean,
         sessionToken: android.support.v4.media.session.MediaSessionCompat.Token?,
-        contentIntent: PendingIntent
+        contentIntent: PendingIntent,
+        position: Long = metadata.currentPosition
     ): Notification {
         ensureChannel()
 
@@ -68,41 +56,34 @@ class PlaybackNotificationHelper(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setShowWhen(false)
 
-        // 封面
         if (metadata.coverBitmap != null) {
             builder.setLargeIcon(metadata.coverBitmap)
         }
 
-        // 动作按钮(顺序:上一个、暂停/播放、下一个)
-        builder.addAction(
-            buildAction(PlaybackAction.ACTION_PREV, android.R.drawable.ic_media_previous, "上一个")
-        )
-        builder.addAction(
-            buildAction(
-                if (isPlaying) PlaybackAction.ACTION_PAUSE else PlaybackAction.ACTION_PLAY,
-                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (isPlaying) "暂停" else "播放"
-            )
-        )
-        builder.addAction(
-            buildAction(PlaybackAction.ACTION_NEXT, android.R.drawable.ic_media_next, "下一个")
-        )
-        builder.addAction(
-            buildAction(PlaybackAction.ACTION_CLOSE, android.R.drawable.ic_menu_close_clear_cancel, "关闭")
-        )
+        if (metadata.duration > 0) {
+            val pos = position.coerceIn(0L, metadata.duration)
+            builder.setProgress(metadata.duration.toInt(), pos.toInt(), false)
+        }
 
-        // MediaStyle:对接系统媒体控制(锁屏/蓝牙/车机)
+        val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        val playPauseAction = if (isPlaying) PlaybackAction.ACTION_PAUSE else PlaybackAction.ACTION_PLAY
+
+        builder.addAction(buildAction(PlaybackAction.ACTION_PREV, android.R.drawable.ic_media_previous, "上一个"))
+        builder.addAction(buildAction(PlaybackAction.ACTION_REWIND, R.drawable.ic_rewind_15, "后退15秒"))
+        builder.addAction(buildAction(playPauseAction, playPauseIcon, if (isPlaying) "暂停" else "播放"))
+        builder.addAction(buildAction(PlaybackAction.ACTION_FORWARD, R.drawable.ic_forward_15, "前进15秒"))
+        builder.addAction(buildAction(PlaybackAction.ACTION_NEXT, android.R.drawable.ic_media_next, "下一个"))
+
         val mediaStyle = MediaStyle()
         if (sessionToken != null) {
             mediaStyle.setMediaSession(sessionToken)
         }
-        mediaStyle.setShowActionsInCompactView(0, 1, 2)  // 收起时显示前 3 个按钮
+        mediaStyle.setShowActionsInCompactView(0, 2, 4)
         builder.setStyle(mediaStyle)
 
         return builder.build()
     }
 
-    /** 构建广播 PendingIntent(通知按钮点击 → 发广播 → Activity/Service 接收)。 */
     private fun buildAction(action: String, icon: Int, label: String): NotificationCompat.Action {
         val intent = Intent(action).setPackage(context.packageName)
         val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)

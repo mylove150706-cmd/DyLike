@@ -42,6 +42,25 @@ class PlaybackService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var audioFocusChangeListener: AudioManager.OnAudioFocusChangeListener? = null
 
+    /** 定时刷新通知进度条(每秒更新 MediaSession position)。 */
+    private val progressHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val progressRunnable = object : Runnable {
+        override fun run() {
+            val p = player ?: return
+            val md = metadata ?: return
+            if (p.isPlaying) {
+                // 用 player 实时 duration 修正 metadata(detach 时可能为 0)
+                val liveDuration = p.duration
+                if (liveDuration > 0 && md.duration != liveDuration) {
+                    metadata = md.copy(duration = liveDuration)
+                }
+                updateMediaSession(metadata!!, isPlaying = true)
+                updateNotification()
+            }
+            progressHandler.postDelayed(this, 1000)
+        }
+    }
+
     /**
      * 后台切集回调:Activity 在 startPlaybackService 时注册。
      * Service 收到通知栏"上一个/下一个"时调用,让 Activity 在后台切集,
@@ -49,6 +68,14 @@ class PlaybackService : Service() {
      */
     @Volatile
     var skipCallback: ((Int) -> Unit)? = null
+
+    /**
+     * seek 目标位置(ms)。用户拖动进度条/后退/前进时设置。
+     * progressRunnable 优先用它显示(避免 seek 异步期间进度回退),
+     * 当 player 实际 position 追上后清除。
+     */
+    @Volatile
+    private var pendingSeekPosition: Long = -1L
 
     /** 通知栏播放/暂停按钮接收器(Service 持有 player,直接控制)。 */
     private val playPauseReceiver = object : android.content.BroadcastReceiver() {
@@ -64,6 +91,15 @@ class PlaybackService : Service() {
                     player?.pause()
                     updateMediaSession(metadata ?: return, isPlaying = false)
                     updateNotification()
+                }
+                PlaybackAction.ACTION_REWIND -> seekRelative(-15000)
+                PlaybackAction.ACTION_FORWARD -> seekRelative(15000)
+                PlaybackAction.ACTION_SEEK -> {
+                    val pos = intent?.getLongExtra(PlaybackAction.EXTRA_SEEK_POSITION, -1L) ?: -1L
+                    if (pos >= 0) {
+                        player?.seekTo(pos)
+                        updateNotification()
+                    }
                 }
                 PlaybackAction.ACTION_NEXT, PlaybackAction.ACTION_PREV -> {
                     // 后台切集:通过回调让 Activity 切集(不拉起 Activity 到前台)。
@@ -103,6 +139,9 @@ class PlaybackService : Service() {
             addAction(PlaybackAction.ACTION_NEXT)
             addAction(PlaybackAction.ACTION_PREV)
             addAction(PlaybackAction.ACTION_CLOSE)
+            addAction(PlaybackAction.ACTION_REWIND)
+            addAction(PlaybackAction.ACTION_FORWARD)
+            addAction(PlaybackAction.ACTION_SEEK)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(playPauseReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -153,11 +192,15 @@ class PlaybackService : Service() {
         // M2: 先释放可能存在的旧 AudioFocus,再重新申请,避免反复 takePlayer 导致 focus 泄漏
         abandonAudioFocus()
         requestAudioFocus()
+        // 启动进度条定时刷新
+        progressHandler.removeCallbacks(progressRunnable)
+        progressHandler.post(progressRunnable)
         Log.i(TAG, "took player: ${metadata.title}")
     }
 
     /** Activity 取回 player。 */
     fun returnPlayer(): AbstractPlayer? {
+        progressHandler.removeCallbacks(progressRunnable)
         val p = player
         player = null
         abandonAudioFocus()
@@ -190,10 +233,11 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // 如果 Service 被销毁时仍持有 player(Activity 异常销毁),释放它
+        // 如果 Service 被销毁时仍持有 player(Activity 异常销毁)，释放它
         player?.release()
         player = null
         abandonAudioFocus()
+        progressHandler.removeCallbacks(progressRunnable)
         unregisterPlayPauseReceiver()
         mediaSession?.release()
         mediaSession = null
@@ -212,6 +256,18 @@ class PlaybackService : Service() {
                 override fun onPlay() { Log.i(TAG, "MediaSession onPlay"); player?.start(); updateNotification() }
                 override fun onPause() { Log.i(TAG, "MediaSession onPause"); player?.pause(); updateNotification() }
                 override fun onStop() { Log.i(TAG, "MediaSession onStop"); player?.stop() }
+                override fun onSkipToNext() { playPauseReceiver.onReceive(this@PlaybackService, Intent(PlaybackAction.ACTION_NEXT)) }
+                override fun onSkipToPrevious() { playPauseReceiver.onReceive(this@PlaybackService, Intent(PlaybackAction.ACTION_PREV)) }
+                override fun onSeekTo(pos: Long) {
+                    Log.i(TAG, "MediaSession onSeekTo: $pos")
+                    pendingSeekPosition = pos
+                    player?.seekTo(pos)
+                    // 立即更新 MediaSession + 通知,避免系统卡片用旧 position 渲染导致回退
+                    metadata?.let { updateMediaSession(it, isPlaying = player?.isPlaying == true) }
+                    updateNotification()
+                }
+                override fun onRewind() { seekRelative(-15000) }
+                override fun onFastForward() { seekRelative(15000) }
             })
             isActive = true
         }
@@ -219,17 +275,20 @@ class PlaybackService : Service() {
 
     private fun updateMediaSession(metadata: PlaybackMetadata, isPlaying: Boolean) {
         val session = mediaSession ?: return
-        // PlaybackState
+        // PlaybackState - 用 displayPosition(seek 期间避免进度条回退)
         val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
         val playbackState = PlaybackStateCompat.Builder()
-            .setState(state, metadata.currentPosition, 1.0f)
+            .setState(state, displayPosition, 1.0f)
             .setActions(
                 PlaybackStateCompat.ACTION_PLAY or
                     PlaybackStateCompat.ACTION_PAUSE or
                     PlaybackStateCompat.ACTION_PLAY_PAUSE or
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                     PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                    PlaybackStateCompat.ACTION_STOP
+                    PlaybackStateCompat.ACTION_STOP or
+                    PlaybackStateCompat.ACTION_SEEK_TO or
+                    PlaybackStateCompat.ACTION_REWIND or
+                    PlaybackStateCompat.ACTION_FAST_FORWARD
             )
             .build()
         session.setPlaybackState(playbackState)
@@ -244,6 +303,31 @@ class PlaybackService : Service() {
         session.setMetadata(md.build())
     }
 
+    /** 相对 seek(±秒数),用于后退/前进按钮。 */
+    private fun seekRelative(deltaMs: Long) {
+        val p = player ?: return
+        val target = (p.currentPosition + deltaMs).coerceAtLeast(0)
+        val dur = p.duration
+        val final = if (dur > 0) target.coerceAtMost(dur) else target
+        pendingSeekPosition = final
+        p.seekTo(final)
+        Log.i(TAG, "seekRelative: delta=$deltaMs target=$final")
+        metadata?.let { updateMediaSession(it, isPlaying = p.isPlaying) }
+        updateNotification()
+    }
+
+    /** 获取当前应显示的 position:优先用 pendingSeekPosition(seek 期间避免回退)。 */
+    private val displayPosition: Long
+        get() {
+            val p = player ?: return pendingSeekPosition.coerceAtLeast(0)
+            val actual = p.currentPosition
+            if (pendingSeekPosition >= 0 && kotlin.math.abs(actual - pendingSeekPosition) > 1000) {
+                return pendingSeekPosition
+            }
+            if (pendingSeekPosition >= 0) pendingSeekPosition = -1L
+            return actual
+        }
+
     private fun updateNotification() {
         val md = metadata ?: return
         val p = player ?: return
@@ -251,7 +335,8 @@ class PlaybackService : Service() {
             md,
             isPlaying = p.isPlaying,
             sessionToken = mediaSession?.sessionToken,
-            contentIntent = createContentIntent()
+            contentIntent = createContentIntent(),
+            position = displayPosition
         ) ?: return
         val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
         manager.notify(PlaybackNotificationHelper.NOTIFICATION_ID, notification)

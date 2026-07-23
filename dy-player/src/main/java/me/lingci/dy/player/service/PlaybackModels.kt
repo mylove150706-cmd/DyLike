@@ -28,4 +28,12 @@ object PlaybackAction {
     const val ACTION_PLAY = "me.lingci.dy.player.playback.PLAY"
     /** 通知栏点了"暂停" */
     const val ACTION_PAUSE = "me.lingci.dy.player.playback.PAUSE"
+    /** 通知栏点了"后退15秒" */
+    const val ACTION_REWIND = "me.lingci.dy.player.playback.REWIND"
+    /** 通知栏点了"前进15秒" */
+    const val ACTION_FORWARD = "me.lingci.dy.player.playback.FORWARD"
+    /** 通知栏拖动了进度条 */
+    const val ACTION_SEEK = "me.lingci.dy.player.playback.SEEK"
+    /** SEEK 广播的 position extra(ms) */
+    const val EXTRA_SEEK_POSITION = "seek_position"
 }

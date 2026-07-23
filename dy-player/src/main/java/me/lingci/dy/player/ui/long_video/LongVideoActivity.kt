@@ -1174,18 +1174,43 @@ class LongVideoActivity : BaseActivity(), OnLongVideoListener, OnPlayNextListene
         }
 
     /**
+     * 当前视频文件路径(用于 MediaMetadataRetriever 提取封面帧)。
+     */
+    private val currentVideoFilePath: String?
+        get() {
+            if (itemViewModel.getItemSize() <= mCurPos) return null
+            val videoData = itemViewModel.getItem(mCurPos)
+            return videoData.videoUrl.takeIf { it.startsWith("/") }
+        }
+
+    /**
      * 用 Glide 异步加载封面 Bitmap,加载完成后回调到主线程。
+     * URL 为空时,对本地视频用 MediaMetadataRetriever 提取一帧作为封面。
      * submit().get() 阻塞,必须在后台线程执行。
      */
     private fun loadCoverBitmap(url: String?, callback: (android.graphics.Bitmap?) -> Unit) {
-        if (url.isNullOrBlank()) { callback(null); return }
         Thread {
             try {
-                val bitmap = com.bumptech.glide.Glide.with(this)
-                    .asBitmap()
-                    .load(url)
-                    .submit(256, 256)
-                    .get()
+                var bitmap: android.graphics.Bitmap? = null
+                if (!url.isNullOrBlank()) {
+                    bitmap = com.bumptech.glide.Glide.with(this)
+                        .asBitmap()
+                        .load(url)
+                        .submit(256, 256)
+                        .get()
+                }
+                // URL 没有或加载失败,尝试从本地视频文件提取帧
+                if (bitmap == null) {
+                    val path = currentVideoFilePath
+                    if (path != null) {
+                        bitmap = android.media.MediaMetadataRetriever().use { retriever ->
+                            try {
+                                retriever.setDataSource(path)
+                                retriever.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                            } catch (_: Exception) { null }
+                        }
+                    }
+                }
                 runOnUiThread { callback(bitmap) }
             } catch (e: Exception) {
                 Log.d(this, "loadCoverBitmap failed: ${e.message}")
