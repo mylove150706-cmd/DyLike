@@ -1,10 +1,8 @@
 package me.lingci.dy.player.ui.short_video
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.ServiceConnection
 import android.content.res.Configuration
 import android.os.Build
 import android.os.IBinder
@@ -26,10 +24,6 @@ import me.lingci.dy.player.core.DyPlayerCore
 import me.lingci.dy.player.core.DyPlayerCoreRegistry
 import me.lingci.dy.player.entity.MediaData
 import me.lingci.dy.player.entity.VideoData
-import me.lingci.dy.player.service.PlaybackAction
-import me.lingci.dy.player.service.PlaybackBinder
-import me.lingci.dy.player.service.PlaybackMetadata
-import me.lingci.dy.player.service.PlaybackService
 import me.lingci.dy.player.ui.long_video.PlayHelper
 import me.lingci.dy.player.util.AppUtil
 import me.lingci.dy.player.util.AppUtil.removeViewFormParent
@@ -228,77 +222,7 @@ class ShortVideoActivity : BaseActivity() {
     // 字幕停靠几何计算较重，拆出后 Activity 只在时机点触发刷新。
     private lateinit var subtitleDockController: SubtitleDockController
 
-    // ===== 后台播放 Service =====
-    private var playbackService: PlaybackBinder? = null
-    private var isBoundToPlaybackService = false
-    /**
-     * M2 fix: 标记 onStop 已发起后台播放绑定，但 Service 尚未把 player 接走。
-     * onStart 取回前台时清掉；tryEnterBackgroundPlay 必须看到此标记才 detach。
-     * 避免 onServiceConnected 在用户已返回前台后才触发，把 player 错误交给 Service。
-     */
-    private var pendingBackgroundEntry = false
-    private val playbackServiceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            playbackService = service as? PlaybackBinder
-            // Service 连上后，把 player 交给它
-            tryEnterBackgroundPlay()
-        }
-        override fun onServiceDisconnected(name: ComponentName?) {
-            playbackService = null
-            isBoundToPlaybackService = false
-        }
-    }
-
-    /** 通知栏控制广播接收器(后台播放时通知按钮)。 */
-    private val playbackActionReceiver = object : android.content.BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                PlaybackAction.ACTION_PREV, PlaybackAction.ACTION_NEXT -> {
-                    // C1 fix: 后台模式下禁止切换短视频(Service 已持有 player)。
-                    // 此时 mVideoView 没有 player 但 playState 仍为 STATE_PLAYING,
-                    // 直接走 startPlay() 会创建第二个 ExoPlayer → 双音频/状态错乱。
-                    // 用户需返回 app 切换视频。
-                    if (playbackService?.isHoldingPlayer != true) {
-                        if (intent?.action == PlaybackAction.ACTION_PREV) {
-                            onPreviousShortVideo()
-                        } else {
-                            onNextShortVideo()
-                        }
-                    }
-                }
-                PlaybackAction.ACTION_CLOSE -> {
-                    // 关闭:停止后台播放 + finish
-                    playbackService?.returnPlayer()?.release()
-                    playbackService = null
-                    finish()
-                }
-            }
-        }
-    }
-    private var isPlaybackReceiverRegistered = false
-
-    private fun registerPlaybackActionReceiver() {
-        if (isPlaybackReceiverRegistered) return
-        val filter = IntentFilter().apply {
-            addAction(PlaybackAction.ACTION_PREV)
-            addAction(PlaybackAction.ACTION_NEXT)
-            addAction(PlaybackAction.ACTION_CLOSE)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(playbackActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(playbackActionReceiver, filter)
-        }
-        isPlaybackReceiverRegistered = true
-    }
-
-    private fun unregisterPlaybackActionReceiver() {
-        if (!isPlaybackReceiverRegistered) return
-        try { unregisterReceiver(playbackActionReceiver) } catch (_: Exception) {}
-        isPlaybackReceiverRegistered = false
-    }
-
-    /** 标记：用户主动按返回退出（不进后台） */
+    /** 标记：用户主动按返回退出 */
     private var userInitiatedExit = false
 
     private fun getExternalTrackController(): ExternalTrackController? {
@@ -1020,14 +944,6 @@ class ShortVideoActivity : BaseActivity() {
 
     override fun onPause() {
         super.onPause()
-        // M1 fix: 若即将进入后台播放（onStop 会 detach player 交给 Service），不要在这里暂停——
-        // 否则 onStop 里 shouldEnterBackgroundPlay() 会因状态已被改为 STATE_PAUSED 而被跳过，
-        // 后台播放功能会静默失效。
-        if (!isChangingConfigurations && !userInitiatedExit && ::mVideoView.isInitialized
-            && mVideoView.isPlaying && mVideoView.hasPlayer()) {
-            logAndCache(TAG, "D", "onPause skip pause: pending background play")
-            return
-        }
         if (::mVideoView.isInitialized) {
             mVideoView.pause()
         }
@@ -1036,211 +952,32 @@ class ShortVideoActivity : BaseActivity() {
 
     override fun onStart() {
         super.onStart()
-        // M2 fix: 用户已返回前台，清除"待进入后台"标记。
-        // 即使 onServiceConnected 这时才触发，tryEnterBackgroundPlay 也会因此跳过 detach。
-        pendingBackgroundEntry = false
-        // 如果 Service 持有 player，取回并重新挂到当前页容器
-        if (isBoundToPlaybackService && playbackService?.isHoldingPlayer == true) {
-            val player = playbackService?.returnPlayer()
-            if (player != null && ::mVideoView.isInitialized) {
-                mVideoView.attachPlayer(player)
-                mVideoView.setEnableAudioFocus(true)
-                // 重新把 mVideoView 加回当前页的 playerContainer（detach 时已 removeViewFormParent）
-                attachVideoViewToCurrentHolder()
-                logAndCache(TAG, "D", "resumed from background, player reattached")
-            }
-            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
-            isBoundToPlaybackService = false
-            playbackService = null
-            // 恢复 ViewPager2 滑动
-            mBinding.viewpage2.isUserInputEnabled = true
-            // 取回 player 后注销通知栏控制广播接收器
-            unregisterPlaybackActionReceiver()
+        // 短视频不做后台播放：回到前台时若处于暂停态，恢复播放。
+        if (::mVideoView.isInitialized && !userInitiatedExit && mVideoView.hasPlayer() && !mVideoView.isPlaying) {
+            mVideoView.start()
         }
     }
 
     override fun onStop() {
         super.onStop()
-        // 用户主动退出 → 不进后台
         if (userInitiatedExit) {
             userInitiatedExit = false
             return
         }
-        // 旋屏等配置变化 → 不进后台
         if (isChangingConfigurations) return
-        // 播放中 + 未暂停 → 进入后台播放模式
-        if (shouldEnterBackgroundPlay()) {
-            startPlaybackService()
-        }
-    }
-
-    /** 后台播放触发条件：播放中 + 有 player。 */
-    private fun shouldEnterBackgroundPlay(): Boolean {
-        if (!::mVideoView.isInitialized) return false
-        return mVideoView.isPlaying && mVideoView.hasPlayer()
-    }
-
-    /** 启动并绑定 PlaybackService。 */
-    private fun startPlaybackService() {
-        val intent = Intent(this, PlaybackService::class.java)
-        intent.putExtra("source_activity", ShortVideoActivity::class.java.name)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
-        bindService(intent, playbackServiceConnection, Context.BIND_AUTO_CREATE)
-        isBoundToPlaybackService = true
-        // M2 fix: 标记正在等待 onServiceConnected → tryEnterBackgroundPlay。
-        // onStart 会清除此标记；如果 Service 回调这时才到，说明用户已返回前台，应放弃 detach。
-        pendingBackgroundEntry = true
-        // 禁用 view 的音频焦点（Service 接管）
-        mVideoView.setEnableAudioFocus(false)
-        logAndCache(TAG, "D", "starting background playback")
-        // 后台时禁止 ViewPager2 滑动
-        mBinding.viewpage2.isUserInputEnabled = false
-        // 注册通知栏控制广播接收器（PREV/NEXT/CLOSE）
-        registerPlaybackActionReceiver()
-    }
-
-    /** 在 ServiceConnection.onServiceConnected 中调用：把 player 交给 Service。 */
-    private fun tryEnterBackgroundPlay() {
-        val binder = playbackService ?: return
-        // M2 fix: 若用户在 Service 连上之前已通过 onStart 返回前台，
-        // pendingBackgroundEntry 会被清除——此时不能 detach，否则会把前台播放的 player 错误交给 Service，
-        // 导致画面冻结+误显示后台通知。直接解绑并退出，让前台继续播放。
-        if (!pendingBackgroundEntry) {
-            logAndCache(TAG, "D", "abort background entry: user already returned to foreground")
-            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
-            isBoundToPlaybackService = false
-            playbackService = null
-            binder.stopForegroundAndNotification()
-            if (::mVideoView.isInitialized) {
-                mVideoView.setEnableAudioFocus(true)
-            }
-            return
-        }
-        pendingBackgroundEntry = false
-        // 短视频：先从 ViewPager2 container detach view，再 detach player
-        removeViewFormParent(mVideoView)
-        val player = mVideoView.detachPlayer() ?: return
-        val metadata = PlaybackMetadata(
-            title = currentShortVideoTitle,
-            subtitle = "第 ${mCurPos + 1} 个",
-            duration = mVideoView.duration,
-            currentPosition = mVideoView.currentPosition
-        )
-        // Task 8: 先用 null 封面 takePlayer(立即显示标题),再异步加载封面后 updateMetadata。
-        binder.setSourceActivity(ShortVideoActivity::class.java)
-        binder.takePlayer(player, metadata.copy(coverBitmap = null))
-        loadCoverBitmap(currentCoverUrl) { bitmap ->
-            if (bitmap != null) {
-                playbackService?.updateMetadata(metadata.copy(coverBitmap = bitmap))
-            }
-        }
-    }
-
-    /**
-     * 当前短视频封面 URL(Task 8):优先用本地 thumb(与 ShortVideoAdapter.loadThumb 一致路径),
-     * 回退到视频源 preview 字段;都没有则返回 null(通知仍可正常显示)。
-     */
-    private val currentCoverUrl: String?
-        get() {
-            if (mCurPos !in mVideoList.indices) return null
-            val videoData = mVideoList[mCurPos]
-            val thumbFile = File(
-                externalCacheDir,
-                ".thumb/${videoData.videoUrl.md5()}.${AppUtil.THUMB_TYPE}"
-            )
-            if (thumbFile.exists() && thumbFile.isFile && thumbFile.length() > 0L) {
-                return thumbFile.path
-            }
-            return videoData.preview.takeIf { it.isNotBlank() }
-        }
-
-    /**
-     * 用 Glide 异步加载封面 Bitmap,加载完成后回调到主线程。
-     * submit().get() 阻塞,必须在后台线程执行。
-     */
-    private fun loadCoverBitmap(url: String?, callback: (android.graphics.Bitmap?) -> Unit) {
-        if (url.isNullOrBlank()) { callback(null); return }
-        Thread {
-            try {
-                val bitmap = com.bumptech.glide.Glide.with(this)
-                    .asBitmap()
-                    .load(url)
-                    .submit(256, 256)
-                    .get()
-                runOnUiThread { callback(bitmap) }
-            } catch (e: Exception) {
-                Log.d(TAG, "loadCoverBitmap failed: ${e.message}")
-                runOnUiThread { callback(null) }
-            }
-        }.start()
-    }
-
-    /** 当前短视频标题（用于后台通知栏）。 */
-    private val currentShortVideoTitle: String
-        get() {
-            return if (mCurPos in mVideoList.indices) {
-                formatShortTitle(mVideoList[mCurPos].name).ifBlank { "短视频" }
-            } else {
-                "短视频"
-            }
-        }
-
-    /** 把 mVideoView 重新加回当前页 ViewHolder 的 playerContainer。 */
-    private fun attachVideoViewToCurrentHolder() {
-        if (!::mVideoView.isInitialized || !::mViewPagerImpl.isInitialized) return
-        if (mCurPos !in mVideoList.indices) return
-        // 如果 mVideoView 已经在某个父容器里，不重复添加
-        if (mVideoView.parent != null) return
-        val count = mViewPagerImpl.childCount
-        for (i in 0 until count) {
-            val itemView = mViewPagerImpl.getChildAt(i)
-            val viewHolder = itemView.tag as? ShortVideoAdapter.ViewHolder ?: continue
-            if (viewHolder.bindingAdapterPosition == mCurPos) {
-                viewHolder.playerContainer.addView(mVideoView, 0)
-                break
-            }
-        }
-    }
-
-    /** 上一个短视频（后台通知栏）。 */
-    private fun onPreviousShortVideo() {
-        if (mCurPos - 1 >= 0) {
-            isUserScroll.set(false)
-            val currentIndex = mCurPos - 1
-            mBinding.viewpage2.setCurrentItem(currentIndex, false)
-            mBinding.viewpage2.postDelayed({ startPlay(currentIndex) }, 30)
-        }
-    }
-
-    /** 下一个短视频（后台通知栏）。 */
-    private fun onNextShortVideo() {
-        if (mCurPos + 1 < mShortVideoAdapter.itemCount) {
-            isUserScroll.set(false)
-            val currentIndex = mCurPos + 1
-            mBinding.viewpage2.setCurrentItem(currentIndex, false)
-            mBinding.viewpage2.postDelayed({ startPlay(currentIndex) }, 30)
+        // 短视频不做后台播放：不可见时直接暂停。
+        if (::mVideoView.isInitialized && mVideoView.hasPlayer()) {
+            mVideoView.pause()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // 注销后台 / 超分 广播接收器
-        unregisterPlaybackActionReceiver()
+        // 注销超分广播接收器
         unregisterSuperResolutionReceiver()
         mediaPlaybackRecorder.release()
         timerCloseController.release()
         activeShortVideoControlView?.setOnVideoTransformChangedListener(null)
-        // 如果 Service 还持有 player（Activity 异常销毁），取回并释放
-        if (isBoundToPlaybackService) {
-            try { unbindService(playbackServiceConnection) } catch (_: Exception) {}
-            isBoundToPlaybackService = false
-        }
-        playbackService?.returnPlayer()?.release()
-        playbackService = null
         if (::mVideoView.isInitialized) {
             mVideoView.release()
         }

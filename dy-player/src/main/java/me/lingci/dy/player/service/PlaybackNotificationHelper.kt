@@ -79,7 +79,7 @@ class PlaybackNotificationHelper(private val context: Context) {
         )
         builder.addAction(
             buildAction(
-                if (isPlaying) "me.lingci.dy.player.playback.PAUSE" else "me.lingci.dy.player.playback.PLAY",
+                if (isPlaying) PlaybackAction.ACTION_PAUSE else PlaybackAction.ACTION_PLAY,
                 if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (isPlaying) "暂停" else "播放"
             )

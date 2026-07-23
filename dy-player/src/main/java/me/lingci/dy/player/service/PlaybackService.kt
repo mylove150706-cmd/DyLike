@@ -1,6 +1,7 @@
 package me.lingci.dy.player.service
 
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -28,6 +29,8 @@ class PlaybackService : Service() {
 
     companion object {
         private const val TAG = "PlaybackService"
+        /** 通知栏切集 extra:+1=下一个,-1=上一个。 */
+        const val EXTRA_SKIP = "playback_skip"
     }
 
     private val binder = PlaybackBinder(this)
@@ -39,6 +42,47 @@ class PlaybackService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var audioFocusChangeListener: AudioManager.OnAudioFocusChangeListener? = null
 
+    /**
+     * 后台切集回调:Activity 在 startPlaybackService 时注册。
+     * Service 收到通知栏"上一个/下一个"时调用,让 Activity 在后台切集,
+     * 新视频起播后重新 detach 给 Service(不拉起 Activity)。
+     */
+    @Volatile
+    var skipCallback: ((Int) -> Unit)? = null
+
+    /** 通知栏播放/暂停按钮接收器(Service 持有 player,直接控制)。 */
+    private val playPauseReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.i(TAG, "playPauseReceiver onReceive: ${intent?.action}")
+            when (intent?.action) {
+                PlaybackAction.ACTION_PLAY -> {
+                    player?.start()
+                    updateMediaSession(metadata ?: return, isPlaying = true)
+                    updateNotification()
+                }
+                PlaybackAction.ACTION_PAUSE -> {
+                    player?.pause()
+                    updateMediaSession(metadata ?: return, isPlaying = false)
+                    updateNotification()
+                }
+                PlaybackAction.ACTION_NEXT, PlaybackAction.ACTION_PREV -> {
+                    // 后台切集:通过回调让 Activity 切集(不拉起 Activity 到前台)。
+                    // Activity 切集后新 player 起播时重新 detach 给 Service。
+                    val cb = skipCallback ?: return
+                    val direction = if (intent?.action == PlaybackAction.ACTION_NEXT) 1 else -1
+                    android.os.Handler(android.os.Looper.getMainLooper()).post { cb(direction) }
+                }
+                PlaybackAction.ACTION_CLOSE -> {
+                    player?.release()
+                    player = null
+                    stopForegroundAndNotification()
+                    stopSelf()
+                }
+            }
+        }
+    }
+    private var isPlayPauseReceiverRegistered = false
+
     val isHoldingPlayer: Boolean get() = player != null
 
     override fun onCreate() {
@@ -47,7 +91,32 @@ class PlaybackService : Service() {
         notificationHelper?.ensureChannel()
         setupMediaSession()
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        registerPlayPauseReceiver()
         Log.i(TAG, "PlaybackService created")
+    }
+
+    private fun registerPlayPauseReceiver() {
+        if (isPlayPauseReceiverRegistered) return
+        val filter = android.content.IntentFilter().apply {
+            addAction(PlaybackAction.ACTION_PLAY)
+            addAction(PlaybackAction.ACTION_PAUSE)
+            addAction(PlaybackAction.ACTION_NEXT)
+            addAction(PlaybackAction.ACTION_PREV)
+            addAction(PlaybackAction.ACTION_CLOSE)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(playPauseReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(playPauseReceiver, filter)
+        }
+        isPlayPauseReceiverRegistered = true
+    }
+
+    private fun unregisterPlayPauseReceiver() {
+        if (isPlayPauseReceiverRegistered) {
+            try { unregisterReceiver(playPauseReceiver) } catch (_: Exception) {}
+            isPlayPauseReceiverRegistered = false
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -125,6 +194,7 @@ class PlaybackService : Service() {
         player?.release()
         player = null
         abandonAudioFocus()
+        unregisterPlayPauseReceiver()
         mediaSession?.release()
         mediaSession = null
         Log.i(TAG, "PlaybackService destroyed")
@@ -139,9 +209,9 @@ class PlaybackService : Service() {
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
             setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() { player?.start() }
-                override fun onPause() { player?.pause() }
-                override fun onStop() { player?.stop() }
+                override fun onPlay() { Log.i(TAG, "MediaSession onPlay"); player?.start(); updateNotification() }
+                override fun onPause() { Log.i(TAG, "MediaSession onPause"); player?.pause(); updateNotification() }
+                override fun onStop() { Log.i(TAG, "MediaSession onStop"); player?.stop() }
             })
             isActive = true
         }

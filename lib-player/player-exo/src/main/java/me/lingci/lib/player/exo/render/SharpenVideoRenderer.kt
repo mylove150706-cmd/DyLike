@@ -104,6 +104,12 @@ class SharpenVideoRenderer(
         glSurfaceViewRef = WeakReference(view)
     }
 
+    /**
+     * 后台播放恢复复用：暴露已创建的 SurfaceTexture，供 GlRenderView 重新 setSurface。
+     * GL 线程未销毁时 surfaceTexture 仍有效；返回 null 表示尚未 onSurfaceCreated。
+     */
+    fun getSurfaceTexture(): SurfaceTexture? = surfaceTexture
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         try {
             // 1. 创建 OES external texture

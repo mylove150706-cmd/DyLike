@@ -15,7 +15,7 @@ data class PlaybackMetadata(
 
 /**
  * 通知栏 / Service → Activity 的广播 action 常量。
- * ACTION_PLAY_PAUSE 不走广播(Service 直接控制 player)。
+ * PLAY/PAUSE 由 Service 直接处理(Service 持有 player)。
  */
 object PlaybackAction {
     /** 通知栏点了"上一个" */
@@ -24,4 +24,8 @@ object PlaybackAction {
     const val ACTION_NEXT = "me.lingci.dy.player.playback.NEXT"
     /** 通知栏点了"关闭" */
     const val ACTION_CLOSE = "me.lingci.dy.player.playback.CLOSE"
+    /** 通知栏点了"播放" */
+    const val ACTION_PLAY = "me.lingci.dy.player.playback.PLAY"
+    /** 通知栏点了"暂停" */
+    const val ACTION_PAUSE = "me.lingci.dy.player.playback.PAUSE"
 }

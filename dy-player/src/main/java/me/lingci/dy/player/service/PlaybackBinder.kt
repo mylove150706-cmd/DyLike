@@ -29,6 +29,11 @@ class PlaybackBinder(private val service: PlaybackService) : android.os.Binder()
         service.updateMetadata(metadata)
     }
 
+    /** Activity 注册后台切集回调(通知栏上一个/下一个时 Service 调用)。 */
+    fun setSkipCallback(callback: ((Int) -> Unit)?) {
+        service.skipCallback = callback
+    }
+
     /** Service 是否持有 player(Activity 恢复时判断)。 */
     val isHoldingPlayer: Boolean get() = service.isHoldingPlayer
 
