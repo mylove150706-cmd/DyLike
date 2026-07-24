@@ -44,6 +44,9 @@ class GlRenderView @JvmOverloads constructor(
     private var mediaPlayer: AbstractPlayer? = null
     private var videoRenderer: SharpenVideoRenderer? = null
     private var isReleased = false
+    // GLSurfaceView.setRenderer 只能调一次。后台播放恢复时 attachToPlayer 会再次调用，
+    // 用此标记避免重复 setRenderer 抛 IllegalStateException: setRenderer has already been called。
+    private var isRendererSet = false
 
     init {
         // GLSurfaceView EGL 配置（参考 Google demo）
@@ -61,7 +64,19 @@ class GlRenderView @JvmOverloads constructor(
 
     override fun attachToPlayer(player: AbstractPlayer) {
         mediaPlayer = player
-        videoRenderer = SharpenVideoRenderer(context) { surfaceTexture ->
+        // 读 NCNN 超分开关
+        val useNcnn = try {
+            val sp = android.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            sp.getBoolean("labNeuralSuperResolution", false)
+        } catch (_: Throwable) { false }
+        // 后台播放恢复复用同一 GLSurfaceView：setRenderer 只能调一次，已设过则跳过。
+        // 通过 requestRender 触发 onSurfaceCreated 重建 SurfaceTexture → setSurface。
+        if (isRendererSet) {
+            Log.d("GlRenderView", "attachToPlayer: renderer already set, requestRender to rebuild surface")
+            requestRender()
+            return
+        }
+        videoRenderer = SharpenVideoRenderer(context, { surfaceTexture ->
             // 此回调在 GL 线程触发，切回主线程调 player.setVideoSurface
             mainHandler.post {
                 if (!isReleased) {
@@ -73,11 +88,12 @@ class GlRenderView @JvmOverloads constructor(
                     }
                 }
             }
-        }.also {
+        }, useNcnn).also {
             it.bindGlSurfaceView(this)
         }
         setRenderer(videoRenderer)
         setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY)
+        isRendererSet = true
     }
 
     override fun getView(): View = this

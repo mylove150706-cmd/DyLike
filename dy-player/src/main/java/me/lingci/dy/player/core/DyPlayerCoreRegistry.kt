@@ -16,16 +16,14 @@ object DyPlayerCoreRegistry {
         videoView: CustomVideoView,
         core: DyPlayerCore,
         useMpvSpecialRender: Boolean = true,
-        useSuperResolution: Boolean = false
+        useSuperResolution: Boolean = false,
+        useNeuralSr: Boolean = false
     ) {
-        // Core injection lives in dy-player after player-ui stopped depending on concrete backends.
-        // MPV may also replace the render factory, so callers should apply generic render choices
-        // before this method and gate short-video overrides with resolveCore().
         when (resolveCore(core)) {
             DyPlayerCore.EXO -> {
                 videoView.setPlayerFactory(CustomExoMediaPlayerFactory.create())
-                // 画质增强开关：开启时用 GLSurfaceView + 锐化 shader；关闭时不覆盖（保留外部设的默认）
-                if (useSuperResolution) {
+                // 画质增强（SGSR1）或神经网络超分（NCNN）：任一开启都用 GlRenderView
+                if (useSuperResolution || useNeuralSr) {
                     videoView.setRenderViewFactory(GlRenderViewFactory.create())
                 }
             }

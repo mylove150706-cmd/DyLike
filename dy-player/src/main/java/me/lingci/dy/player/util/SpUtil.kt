@@ -203,11 +203,20 @@ open class SpUtil(context: Context) : SpBase(context) {
      */
     var labSuperResolutionStrength by SPManager.float(1.0f)
 
+    /**
+     * 神经网络超分：开启后用 NCNN + Real-ESRGANv3 做实时 AI 超分。
+     * 与 labMpvSuperResolution（SGSR1）互斥。仅 ExoPlayer 内核生效。
+     */
+    var labNeuralSuperResolution by SPManager.boolean(false)
+
     // 长视频竖屏播放：开启后长视频默认竖屏，点击旋转按钮可切换横屏全屏
     var labLongVideoPortrait by SPManager.boolean(false)
 
     // 长视频画中画：开启后按 Home 键自动进入 PiP 小窗（需系统支持）
     var longVideoPip by SPManager.boolean(true)
+
+    // 长视频后台播放：开启后 PiP 关闭/无 PiP 时按 Home 进入后台音频播放
+    var longVideoBackgroundPlay by SPManager.boolean(false)
 
     private companion object {
         private const val KEY_VIDEO_PLAYER_CORE = "videoPlayerCore"
