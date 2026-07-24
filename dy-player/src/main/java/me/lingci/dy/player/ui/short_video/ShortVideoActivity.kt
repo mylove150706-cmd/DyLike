@@ -147,6 +147,28 @@ class ShortVideoActivity : BaseActivity() {
     private val shortMoreDialog by lazy { ShortMoreDialog() }
     private var activeShortVideoControlView: ShortVideoControlView? = null
 
+    /** 沉浸体验定时器(Activity 级,确保操作的是活跃的 ControlView)。 */
+    private val immersiveHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var immersiveScheduled = false
+    private val enterImmersiveRunnable = Runnable {
+        immersiveScheduled = false
+        activeShortVideoControlView?.enterImmersive()
+    }
+    private fun scheduleImmersive() {
+        if (!spUtil.showSysBar.not()) return
+        immersiveHandler.removeCallbacks(enterImmersiveRunnable)
+        immersiveScheduled = true
+        immersiveHandler.postDelayed(enterImmersiveRunnable, 3000)
+    }
+    private fun cancelImmersive() {
+        immersiveHandler.removeCallbacks(enterImmersiveRunnable)
+        immersiveScheduled = false
+    }
+    private fun exitAndRescheduleImmersive() {
+        activeShortVideoControlView?.exitImmersive()
+        scheduleImmersive()
+    }
+
     // 超分开关广播接收器：仅写 SP，重播生效由短视频列表自然触发（滑到下一个再滑回来）。
     // 短视频列表架构复杂，运行时强切 render view 风险大；简化为"下次播放时生效"。
     private val superResolutionReceiver = object : android.content.BroadcastReceiver() {
@@ -380,8 +402,10 @@ class ShortVideoActivity : BaseActivity() {
             mVideoView.setLooping(PlayerInitializer.Player.shortAutoNext.not())
             mVideoView.changeSysBar(PlayerInitializer.Player.shortShowSysBar)
             mVideoView.start()
-            // 沉浸体验开关同步到 ControlView
-            activeShortVideoControlView?.setAutoImmersiveEnabled(spUtil.showSysBar.not())
+            // 沉浸体验:开关变化时重新调度
+            cancelImmersive()
+            activeShortVideoControlView?.exitImmersive()
+            scheduleImmersive()
         }
         shortSettingsDialog.onTimerClose {
             timerCloseController.showDialog()
@@ -527,7 +551,6 @@ class ShortVideoActivity : BaseActivity() {
                 if (state == ViewPager2.SCROLL_STATE_IDLE) {
                     isUserScroll.set(false)
                     resetAllControlViewAlpha(animated = true)
-                    // 沉浸体验:用 spUtil 作为单一真相来源
                     activeShortVideoControlView?.setAutoImmersiveEnabled(spUtil.showSysBar.not())
                 } else {
                     isUserScroll.set(true)
@@ -596,6 +619,11 @@ class ShortVideoActivity : BaseActivity() {
                 mVideoView.changeSysBar(show)
             }
 
+            override fun onSingleTap() {
+                // 沉浸体验:点击屏幕退出沉浸并重新计时
+                exitAndRescheduleImmersive()
+            }
+
         })
 
         // ViewPage2内部是通过RecyclerView去实现的，它位于ViewPager2的第0个位置
@@ -658,6 +686,7 @@ class ShortVideoActivity : BaseActivity() {
             val itemView = mViewPagerImpl.getChildAt(i)
             val viewHolder = itemView.tag as ShortVideoAdapter.ViewHolder
             if (viewHolder.bindingAdapterPosition == position) {
+                // 旧 ControlView 设为非活跃
                 activeShortVideoControlView?.setOnVideoTransformChangedListener(null)
                 clearSubtitleCueListener()
                 mVideoView.release()
@@ -701,8 +730,10 @@ class ShortVideoActivity : BaseActivity() {
                     updateSubtitleDocking()
                 }
                 activeShortVideoControlView = viewHolder.shortVideoControlView
-                // 沉浸体验:切视频后同步自动沉浸开关(用 spUtil 单一真相来源)
                 viewHolder.shortVideoControlView.setAutoImmersiveEnabled(spUtil.showSysBar.not())
+                // 切视频后重新调度沉浸(Activity 级定时器,确保操作的是活跃的 ControlView)
+                cancelImmersive()
+                scheduleImmersive()
                 viewHolder.playerContainer.addView(mVideoView, 0)
                 viewHolder.shortVideoControlView.resetScale(1.0f)
                 mCurPos = position
